@@ -1,0 +1,2 @@
+# Ignore training artifacts
+backend/checkpoints/
