@@ -696,7 +696,12 @@ async function refreshBackendStatus() {
     state.backendDevice = device;
     setBackendStatus('在线', device);
     if (statusEl && statusEl.textContent.includes('后端')) {
-      setTurnStatus();
+      const isFreshStart = !state.gameOver && state.history.length === 0 && !state.lastMove;
+      if (isFreshStart) {
+        setStatus('新对局开始：红方先走');
+      } else {
+        setTurnStatus();
+      }
     }
   } catch (err) {
     state.backendOnline = false;
