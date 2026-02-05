@@ -703,6 +703,9 @@ async function refreshBackendStatus() {
     state.backendDevice = '';
     state.lastBookMove = false;
     setBackendStatus('离线', '未连接');
+    if (!state.gameOver) {
+      setStatus('后端离线，无法走子');
+    }
   }
 }
 
@@ -724,7 +727,7 @@ function parsePythonTrainProgress(lines) {
   return null;
 }
 
-function updatePythonTrainProgress(lines, config, running) {
+function updatePythonTrainProgress(lines, config, running, startTime) {
   if (!running) {
     pythonTrainRunning = false;
     pythonTrainStartTime = null;
@@ -740,22 +743,39 @@ function updatePythonTrainProgress(lines, config, running) {
     pythonTrainProgress = { ...pythonTrainProgress, total: config.iterations };
   }
 
-  if (!pythonTrainStartTime) {
-    pythonTrainStartTime = performance.now();
+  if (Number.isFinite(startTime) && startTime > 0) {
+    pythonTrainStartTime = startTime * 1000;
   }
+
+  if (!pythonTrainStartTime) {
+    pythonTrainStartTime = Date.now();
+  }
+}
+
+function formatClockTime(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const yyyy = String(d.getFullYear());
+  const mmDate = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${yyyy}-${mmDate}-${dd} ${hh}:${mm}:${ss}`;
 }
 
 function getPythonTrainEtaText() {
   if (!pythonTrainRunning) return '';
+  const startText = pythonTrainStartTime ? `开始：${formatClockTime(pythonTrainStartTime)} ` : '';
   if (!pythonTrainStartTime || pythonTrainProgress.current <= 0 || pythonTrainProgress.total <= 0) {
-    return '预计剩余：估算中';
+    return `${startText}预计剩余：估算中`.trim();
   }
-  const elapsed = Math.max(0.001, (performance.now() - pythonTrainStartTime) / 1000);
-  if (elapsed < 2) return '预计剩余：估算中';
+  const elapsed = Math.max(0.001, (Date.now() - pythonTrainStartTime) / 1000);
+  if (elapsed < 2) return `${startText}预计剩余：估算中`.trim();
   const rate = pythonTrainProgress.current / elapsed;
-  if (!Number.isFinite(rate) || rate <= 0) return '预计剩余：估算中';
+  if (!Number.isFinite(rate) || rate <= 0) return `${startText}预计剩余：估算中`.trim();
   const remaining = Math.max(0, pythonTrainProgress.total - pythonTrainProgress.current);
-  return `预计剩余：${formatDuration(remaining / rate)}`;
+  return `${startText}预计剩余：${formatDuration(remaining / rate)}`.trim();
 }
 
 function renderPythonTrainLog() {
@@ -799,7 +819,7 @@ function startPythonTrainPolling() {
   pythonTrainTimer = setInterval(async () => {
     const status = await fetchPythonTrainStatus();
     if (!status) return;
-    updatePythonTrainProgress(status.lines, status.config, Boolean(status.running));
+    updatePythonTrainProgress(status.lines, status.config, Boolean(status.running), status.startTime);
     if (Array.isArray(status.lines) && status.lines.length) {
       setPythonTrainLog(status.lines);
     } else if (status.running) {
@@ -843,7 +863,7 @@ function readPythonTrainInputs() {
 async function startPythonTraining() {
   if (!pyTrainStartEl) return;
   const { iterations, gamesPerIter, simulations, lr, batchSize, epochs, bufferSize } = readPythonTrainInputs();
-  pythonTrainStartTime = performance.now();
+  pythonTrainStartTime = Date.now();
   pythonTrainProgress = { current: 0, total: iterations };
   pythonTrainRunning = true;
   setPythonTrainControls(true);
@@ -888,7 +908,7 @@ async function initPythonTrainingUI() {
   if (!pyTrainLogEl) return;
   const status = await fetchPythonTrainStatus();
   if (!status) return;
-  updatePythonTrainProgress(status.lines, status.config, Boolean(status.running));
+  updatePythonTrainProgress(status.lines, status.config, Boolean(status.running), status.startTime);
   if (Array.isArray(status.lines) && status.lines.length) {
     setPythonTrainLog(status.lines);
   } else if (status.running) {
@@ -1130,7 +1150,7 @@ function bindControls() {
 createBoard();
 bindControls();
 refreshBackendStatus();
-setInterval(refreshBackendStatus, 6000);
+setInterval(refreshBackendStatus, 1000);
 initPythonTrainingUI();
 renderPythonTrainLog();
 resetGame();

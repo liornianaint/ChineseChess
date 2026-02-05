@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
+import time
 import subprocess
 import sys
 import threading
@@ -103,6 +104,7 @@ class TrainingManager:
         self.last_exit_code: Optional[int] = None
         self.config: Dict[str, float] = {}
         self.error: Optional[str] = None
+        self.start_time: Optional[float] = None
 
     def start(self, config: TrainStartRequest) -> bool:
         if self.process and self.process.poll() is None:
@@ -146,6 +148,7 @@ class TrainingManager:
         self.config = config.dict()
         self.error = None
         self.running = True
+        self.start_time = time.time()
         self.lines.append("训练已启动，正在自我对弈生成数据…")
         self.last_exit_code = None
         self.reader = threading.Thread(target=self._read_output, daemon=True)
@@ -165,6 +168,7 @@ class TrainingManager:
             code = self.process.wait()
             self.last_exit_code = code
             self.running = False
+            self.start_time = None
             if code == 0:
                 if reload_model():
                     self.lines.append("训练完成，模型已自动加载。")
@@ -191,6 +195,7 @@ class TrainingManager:
             "config": self.config,
             "error": self.error,
             "pid": getattr(self.process, "pid", None),
+            "startTime": self.start_time,
         }
 
 
