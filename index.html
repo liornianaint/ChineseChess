@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>中国象棋AI</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="hero">
+        <div>
+          <h1>中国象棋AI</h1>
+          <div class="backend-status" id="backendStatus">后端状态：检测中…</div>
+        </div>
+        <div class="badge">Light Self-Play</div>
+      </header>
+
+
+      <main class="layout">
+        <section class="board-panel">
+          <div class="board-wrap">
+            <div id="board" class="board" aria-label="Xiangqi board"></div>
+          </div>
+          <div class="status" id="status">后端检测中…</div>
+        </section>
+
+        <aside class="control-panel">
+          <div class="card">
+            <h2>对弈设置</h2>
+            <div class="row">
+              <label>
+                <input type="checkbox" id="aiRed" /> AI 控制红方
+              </label>
+              <label>
+                <input type="checkbox" id="aiBlack" checked /> AI 控制黑方
+              </label>
+            </div>
+            <div class="row">
+              <label for="depth">AI 搜索深度</label>
+              <select id="depth">
+                <option value="2">2</option>
+                <option value="3" selected>3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+                <option value="6">6</option>
+              </select>
+            </div>            <div class="row">
+              <button id="newGame">新对局</button>
+              <button id="undoMove">悔棋</button>
+              <button id="aiMove">AI 走一步</button>
+            </div>
+            <div class="row">
+              <label>
+                <input type="checkbox" id="autoPlay" checked /> AI 自动走子
+              </label>
+            </div>
+            <div class="row">
+              <label>
+                <input type="checkbox" id="openingBook" checked /> 开局库辅助
+              </label>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Python 训练</h2>
+            <div class="row">
+              <label for="pyTrainIters" title="迭代次数：训练轮数。总对局数=迭代次数×每轮对局。建议 50-600。">迭代次数</label>
+              <input id="pyTrainIters" type="number" min="1" max="5000" value="200" />
+            </div>
+            <div class="row">
+              <label for="pyTrainGames" title="每轮对局：每轮收集的自我对弈局数。建议 4-12。">每轮对局</label>
+              <input id="pyTrainGames" type="number" min="1" max="200" value="8" />
+            </div>
+            <div class="row">
+              <label for="pyTrainSims" title="每步 MCTS 搜索的仿真次数。推荐 120-480，越高越强但越慢。">MCTS 仿真数</label>
+              <input id="pyTrainSims" type="number" min="32" max="4000" value="320" />
+            </div>
+            <div class="row">
+              <label for="pyTrainAdvanced" title="显示/隐藏学习率、batch size、epochs、buffer size 等高级参数。">高级参数</label>
+              <input id="pyTrainAdvanced" type="checkbox" />
+            </div>
+            <div class="advanced" id="pyTrainAdvancedPanel" hidden>
+              <div class="row">
+                <label for="pyTrainPreset" title="高级模板：一键设置学习率、batch、epochs、buffer。">高级模板</label>
+                <select id="pyTrainPreset">
+                  <option value="balanced" selected>平衡（推荐）</option>
+                  <option value="speed">省时</option>
+                  <option value="strong">强度优先</option>
+                  <option value="custom">自定义</option>
+                </select>
+              </div>
+              <div class="row">
+                <label for="pyTrainLR" title="学习率：控制梯度更新幅度。推荐 0.001-0.003，默认 0.002。">学习率</label>
+                <input id="pyTrainLR" type="number" min="0.0005" max="0.01" step="0.0005" value="0.002" />
+              </div>
+              <div class="row">
+                <label for="pyTrainBatch" title="Batch size：每次更新用的样本数。推荐 64-256，默认 128。">Batch size</label>
+                <input id="pyTrainBatch" type="number" min="16" max="512" value="128" />
+              </div>
+              <div class="row">
+                <label for="pyTrainEpochs" title="Epochs：每轮训练遍历缓冲区次数。推荐 1-3，默认 2。">Epochs</label>
+                <input id="pyTrainEpochs" type="number" min="1" max="6" value="2" />
+              </div>
+              <div class="row">
+                <label for="pyTrainBuffer" title="Buffer size：自我对弈样本缓冲区大小。推荐 8000-20000，默认 12000。">Buffer size</label>
+                <input id="pyTrainBuffer" type="number" min="2000" max="50000" value="12000" />
+              </div>
+            </div>
+            <div class="row">
+              <button id="pyTrainStart">开始训练</button>
+              <button id="pyTrainStop" disabled>停止训练</button>
+            </div>
+            <div class="hint">训练会占用大量算力，建议训练时减少对弈或暂停自动走子。</div>
+            <div class="log-header">
+              <span>训练日志</span>
+            </div>
+            <div class="log" id="pyTrainLog">Python 训练日志会出现在这里…</div>
+            <div class="log-meta" id="pyTrainLogMeta"></div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

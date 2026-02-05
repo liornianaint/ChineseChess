@@ -1,0 +1,1136 @@
+import {
+  initialBoard,
+  generateLegalMoves,
+  makeMove,
+  gameStatus,
+  searchBestMove,
+  searchBestMoveFromMoves,
+  defaultWeights,
+  isRed,
+  isBlack,
+  opposite,
+  isInCheck,
+  findCheckers,
+  pieceType,
+  positionKey,
+} from './engine.js';
+
+const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8001';
+const PYTHON_TRAIN_KEY = 'xiangqi_python_train_cfg_v1';
+
+const DEFAULT_PYTHON_TRAIN = {
+  iterations: 200,
+  gamesPerIter: 8,
+  simulations: 320,
+  lr: 0.002,
+  batchSize: 128,
+  epochs: 2,
+  bufferSize: 12000,
+  advanced: false,
+  preset: 'balanced',
+};
+
+const PYTHON_TRAIN_PRESETS = {
+  balanced: { lr: 0.002, batchSize: 128, epochs: 2, bufferSize: 12000 },
+  speed: { lr: 0.003, batchSize: 64, epochs: 1, bufferSize: 8000 },
+  strong: { lr: 0.0015, batchSize: 192, epochs: 3, bufferSize: 18000 },
+};
+const REPETITION_LIMIT = 3;
+const LONG_CHECK_LIMIT = 6;
+
+const PIECE_LABELS = {
+  K: '帅',
+  A: '仕',
+  B: '相',
+  N: '马',
+  R: '车',
+  C: '炮',
+  P: '兵',
+  k: '将',
+  a: '士',
+  b: '象',
+  n: '马',
+  r: '车',
+  c: '炮',
+  p: '卒',
+};
+
+const PIECE_LIST = ['K', 'A', 'B', 'N', 'R', 'C', 'P'];
+const AI_TIME_LIMITS = {
+  2: 320,
+  3: 520,
+  4: 760,
+  5: 1050,
+  6: 1400,
+};
+
+const MAX_SEARCH_THREADS = 12;
+const DEFAULT_SEARCH_THREADS = Math.max(2, Math.min(MAX_SEARCH_THREADS, navigator.hardwareConcurrency || 4));
+const MIN_MULTI_DEPTH = 3;
+
+const PYTHON_SIM_MAP = {
+  2: 140,
+  3: 220,
+  4: 340,
+  5: 520,
+  6: 740,
+};
+
+const boardEl = document.getElementById('board');
+const statusEl = document.getElementById('status');
+
+const aiRedEl = document.getElementById('aiRed');
+const aiBlackEl = document.getElementById('aiBlack');
+const depthEl = document.getElementById('depth');
+const newGameEl = document.getElementById('newGame');
+const undoEl = document.getElementById('undoMove');
+const aiMoveEl = document.getElementById('aiMove');
+const autoPlayEl = document.getElementById('autoPlay');
+const openingBookEl = document.getElementById('openingBook');
+const backendStatusEl = document.getElementById('backendStatus');
+
+const pyTrainItersEl = document.getElementById('pyTrainIters');
+const pyTrainGamesEl = document.getElementById('pyTrainGames');
+const pyTrainSimsEl = document.getElementById('pyTrainSims');
+const pyTrainAdvancedEl = document.getElementById('pyTrainAdvanced');
+const pyTrainAdvancedPanelEl = document.getElementById('pyTrainAdvancedPanel');
+const pyTrainPresetEl = document.getElementById('pyTrainPreset');
+const pyTrainLrEl = document.getElementById('pyTrainLR');
+const pyTrainBatchEl = document.getElementById('pyTrainBatch');
+const pyTrainEpochsEl = document.getElementById('pyTrainEpochs');
+const pyTrainBufferEl = document.getElementById('pyTrainBuffer');
+const pyTrainStartEl = document.getElementById('pyTrainStart');
+const pyTrainStopEl = document.getElementById('pyTrainStop');
+const pyTrainLogEl = document.getElementById('pyTrainLog');
+const pyTrainLogToggleEl = document.getElementById('pyTrainLogToggle');
+const pyTrainLogMetaEl = document.getElementById('pyTrainLogMeta');
+
+const state = {
+  board: initialBoard(),
+  sideToMove: 'r',
+  selected: null,
+  legalMoves: [],
+  history: [],
+  lastMove: null,
+  lastMoveByAI: false,
+  aiSide: { r: false, b: true },
+  autoPlay: true,
+  aiThinking: false,
+  gameOver: false,
+  weights: defaultWeights(),
+  positionCounts: new Map(),
+  checkStreak: { side: null, count: 0 },
+  backendOnline: false,
+  backendDevice: '',
+  lastBookMove: false,
+  useOpeningBook: true,
+  useMultiThread: true,
+  searchThreads: DEFAULT_SEARCH_THREADS,
+};
+
+let traceEl = null;
+let audioContext = null;
+
+const searchWorkers = [];
+let searchRequestId = 0;
+let pythonTrainTimer = null;
+let pythonTrainConfig = loadPythonTrainConfig();
+let pythonTrainLogExpanded = false;
+let pythonTrainLogLines = [];
+let pythonTrainStartTime = null;
+let pythonTrainProgress = { current: 0, total: 0 };
+let pythonTrainRunning = false;
+
+function loadPythonTrainConfig() {
+  const raw = localStorage.getItem(PYTHON_TRAIN_KEY);
+  if (!raw) return { ...DEFAULT_PYTHON_TRAIN };
+  try {
+    const parsed = JSON.parse(raw);
+    return { ...DEFAULT_PYTHON_TRAIN, ...parsed };
+  } catch (err) {
+    return { ...DEFAULT_PYTHON_TRAIN };
+  }
+}
+
+function savePythonTrainConfig(next) {
+  pythonTrainConfig = { ...pythonTrainConfig, ...next };
+  localStorage.setItem(PYTHON_TRAIN_KEY, JSON.stringify(pythonTrainConfig));
+}
+
+function getBackendBaseUrl() {
+  return DEFAULT_BACKEND_URL.replace(/\/$/, '');
+}
+
+function clampInt(value, min, max, fallback) {
+  const num = parseInt(value, 10);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, num));
+}
+
+function clampFloat(value, min, max, fallback) {
+  const num = parseFloat(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, num));
+}
+
+function applyPythonTrainPreset(key) {
+  const preset = PYTHON_TRAIN_PRESETS[key];
+  if (!preset) return;
+  if (pyTrainLrEl) pyTrainLrEl.value = preset.lr;
+  if (pyTrainBatchEl) pyTrainBatchEl.value = preset.batchSize;
+  if (pyTrainEpochsEl) pyTrainEpochsEl.value = preset.epochs;
+  if (pyTrainBufferEl) pyTrainBufferEl.value = preset.bufferSize;
+  if (pyTrainPresetEl) pyTrainPresetEl.value = key;
+  savePythonTrainConfig({ ...preset, preset: key });
+}
+
+function setPresetCustom() {
+  if (pyTrainPresetEl && pyTrainPresetEl.value !== 'custom') {
+    pyTrainPresetEl.value = 'custom';
+    savePythonTrainConfig({ preset: 'custom' });
+  }
+}
+
+function pythonSimsForDepth(depth) {
+  return PYTHON_SIM_MAP[depth] || 240;
+}
+
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+
+function setTurnStatus() {
+  const base = state.sideToMove === 'r' ? '轮到红方' : '轮到黑方';
+  if (isInCheck(state.board, state.sideToMove)) {
+    setStatus(`${base}（被将军）`);
+  } else {
+    setStatus(base);
+  }
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m ${String(sec).padStart(2, '0')}s`;
+  return `${m}m ${String(sec).padStart(2, '0')}s`;
+}
+
+function playCheckmateSound() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    if (!audioContext) audioContext = new AudioCtx();
+    const ctx = audioContext;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(440, now);
+    osc.frequency.exponentialRampToValueAtTime(880, now + 0.25);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.18, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.6);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.65);
+  } catch (err) {
+    // ignore audio errors
+  }
+}
+
+function createBoard() {
+  boardEl.innerHTML = '';
+  traceEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  traceEl.setAttribute('id', 'moveTrace');
+  traceEl.setAttribute('aria-hidden', 'true');
+  traceEl.classList.add('move-trace');
+  boardEl.appendChild(traceEl);
+
+  const river = document.createElement('div');
+  river.className = 'river';
+  river.innerHTML = '<span>楚河</span><span>汉界</span>';
+  boardEl.appendChild(river);
+
+  for (let y = 0; y < 10; y += 1) {
+    for (let x = 0; x < 9; x += 1) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.dataset.idx = String(y * 9 + x);
+      boardEl.appendChild(cell);
+    }
+  }
+  boardEl.addEventListener('click', onBoardClick);
+}
+
+function renderTrace() {
+  if (!traceEl) return;
+  traceEl.innerHTML = '';
+  traceEl.classList.remove('trace-animate');
+  if (!state.lastMove || !state.lastMoveByAI) return;
+
+  const fromCell = boardEl.querySelector(`.cell[data-idx="${state.lastMove.from}"]`);
+  const toCell = boardEl.querySelector(`.cell[data-idx="${state.lastMove.to}"]`);
+  if (!fromCell || !toCell) return;
+
+  const boardRect = boardEl.getBoundingClientRect();
+  if (boardRect.width === 0 || boardRect.height === 0) return;
+
+  const fromRect = fromCell.getBoundingClientRect();
+  const toRect = toCell.getBoundingClientRect();
+  const fx = fromRect.left - boardRect.left + fromRect.width / 2;
+  const fy = fromRect.top - boardRect.top + fromRect.height / 2;
+  const tx = toRect.left - boardRect.left + toRect.width / 2;
+  const ty = toRect.top - boardRect.top + toRect.height / 2;
+
+  const color = isRed(state.lastMove.piece) ? '#b23a1b' : '#1f1f1f';
+  const stroke = Math.max(2, Math.min(4, boardRect.width / 180));
+  const markerSize = stroke * 2.8;
+
+  traceEl.setAttribute('width', boardRect.width);
+  traceEl.setAttribute('height', boardRect.height);
+  traceEl.setAttribute('viewBox', `0 0 ${boardRect.width} ${boardRect.height}`);
+
+  traceEl.innerHTML = `    <defs>
+      <marker id="arrowhead" markerWidth="${markerSize}" markerHeight="${markerSize}"
+        refX="${markerSize * 0.6}" refY="${markerSize / 2}" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L${markerSize},${markerSize / 2} L0,${markerSize} Z" fill="${color}" />
+      </marker>
+    </defs>
+    <line class="trace-line" x1="${fx}" y1="${fy}" x2="${tx}" y2="${ty}" stroke="${color}" stroke-width="${stroke}" stroke-linecap="round" marker-end="url(#arrowhead)" />
+    <circle class="trace-dot trace-dot-start" cx="${fx}" cy="${fy}" r="${stroke * 1.1}" fill="${color}" opacity="0.6" />
+    <circle class="trace-dot trace-dot-end" cx="${tx}" cy="${ty}" r="${stroke * 1.4}" fill="${color}" opacity="0.85" />
+  `;
+
+  traceEl.getBoundingClientRect();
+  traceEl.classList.add('trace-animate');
+}
+
+function getSearchWorker(index) {
+  if (!searchWorkers[index]) {
+    searchWorkers[index] = new Worker('search-worker.js', { type: 'module' });
+  }
+  return searchWorkers[index];
+}
+
+function runWorkerSearch(worker, payload, timeoutMs) {
+  return new Promise((resolve) => {
+    const id = ++searchRequestId;
+    let settled = false;
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve({ timeout: true });
+        }, timeoutMs + 120)
+      : null;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+    };
+
+    const onMessage = (event) => {
+      if (!event.data || event.data.id !== id) return;
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(event.data);
+    };
+
+    const onError = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ error: true });
+    };
+
+    worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError);
+    worker.postMessage({ ...payload, id, type: 'search' });
+  });
+}
+
+async function searchMultiThread(board, side, weights, depth, timeLimitMs, movePool = null) {
+  const moves = Array.isArray(movePool) ? movePool : generateLegalMoves(board, side);
+  if (moves.length === 0) return { move: null, score: -Infinity, depth: 0 };
+
+  const threadCount = Math.max(1, Math.min(state.searchThreads, moves.length));
+  if (threadCount <= 1 || depth < MIN_MULTI_DEPTH) {
+    return searchBestMoveFromMoves(board, side, weights, depth, {
+      moves,
+      maxDepth: depth,
+      timeLimitMs,
+    });
+  }
+
+  const groups = Array.from({ length: threadCount }, () => []);
+  moves.forEach((move, idx) => {
+    groups[idx % threadCount].push(move);
+  });
+
+  const tasks = groups.map((group, index) =>
+    runWorkerSearch(
+      getSearchWorker(index),
+      { board, side, weights, depth, maxDepth: depth, timeLimitMs, moves: group },
+      timeLimitMs
+    )
+  );
+
+  const results = await Promise.all(tasks);
+  let bestMove = null;
+  let bestScore = -Infinity;
+  let bestDepth = 0;
+
+  for (const res of results) {
+    if (!res || res.error || res.timeout) continue;
+    if (res.move && res.score > bestScore) {
+      bestScore = res.score;
+      bestMove = res.move;
+      bestDepth = res.depth || 0;
+    }
+  }
+
+  if (!bestMove) {
+    return searchBestMove(board, side, weights, depth, {
+      useBook: false,
+      maxDepth: depth,
+      timeLimitMs,
+    });
+  }
+
+  return { move: bestMove, score: bestScore, depth: bestDepth };
+}
+
+function renderBoard() {
+  const cells = boardEl.querySelectorAll('.cell');
+  cells.forEach((cell) => {
+    const idx = Number(cell.dataset.idx);
+    const piece = state.board[idx];
+    cell.textContent = piece ? PIECE_LABELS[piece] || piece : '';
+    cell.classList.remove('red', 'black', 'selected', 'move', 'capture', 'last-from', 'last-to', 'checking', 'in-check');
+    if (piece) {
+      if (isRed(piece)) cell.classList.add('red');
+      if (isBlack(piece)) cell.classList.add('black');
+    }
+  });
+
+  if (state.selected !== null) {
+    const selectedCell = boardEl.querySelector(`.cell[data-idx="${state.selected}"]`);
+    if (selectedCell) selectedCell.classList.add('selected');
+    state.legalMoves.forEach((move) => {
+      const targetCell = boardEl.querySelector(`.cell[data-idx="${move.to}"]`);
+      if (targetCell) targetCell.classList.add(move.capture ? 'capture' : 'move');
+    });
+  }
+
+  if (state.lastMove) {
+    const fromCell = boardEl.querySelector(`.cell[data-idx="${state.lastMove.from}"]`);
+    const toCell = boardEl.querySelector(`.cell[data-idx="${state.lastMove.to}"]`);
+    if (fromCell) fromCell.classList.add('last-from');
+    if (toCell) toCell.classList.add('last-to');
+  }
+
+  const checkers = findCheckers(state.board, state.sideToMove);
+  if (checkers.length) {
+    checkers.forEach((idx) => {
+      const cell = boardEl.querySelector(`.cell[data-idx="${idx}"]`);
+      if (cell) cell.classList.add('checking');
+    });
+    const kingIdx = state.board.findIndex((piece) =>
+      piece && pieceType(piece) === 'K' && (state.sideToMove === 'r' ? isRed(piece) : isBlack(piece))
+    );
+    if (kingIdx !== -1) {
+      const kingCell = boardEl.querySelector(`.cell[data-idx="${kingIdx}"]`);
+      if (kingCell) kingCell.classList.add('in-check');
+    }
+  }
+
+  renderTrace();
+}
+
+function isHumanTurn() {
+  return !state.aiSide[state.sideToMove];
+}
+
+function updateLegalMoves() {
+  if (state.selected === null) {
+    state.legalMoves = [];
+    return;
+  }
+  const moves = generateLegalMoves(state.board, state.sideToMove);
+  state.legalMoves = moves.filter((move) => move.from === state.selected);
+}
+
+function onBoardClick(event) {
+  const target = event.target;
+  const cell = target && target.closest ? target.closest('.cell') : target && target.parentElement ? target.parentElement.closest('.cell') : null;
+  if (!cell) return;
+  if (state.gameOver) return;
+  if (!state.backendOnline) {
+    if (state.selected !== null) {
+      state.selected = null;
+      state.legalMoves = [];
+      renderBoard();
+    }
+    setStatus('后端离线，无法走子');
+    return;
+  }
+  if (!isHumanTurn()) return;
+
+  const idx = Number(cell.dataset.idx);
+  const piece = state.board[idx];
+
+  if (state.selected !== null) {
+    const move = state.legalMoves.find((m) => m.to === idx);
+    if (move) {
+      commitMove(move, { byAI: false });
+      return;
+    }
+  }
+
+  if (piece && ((state.sideToMove === 'r' && isRed(piece)) || (state.sideToMove === 'b' && isBlack(piece)))) {
+    state.selected = idx;
+    updateLegalMoves();
+    renderBoard();
+  } else {
+    state.selected = null;
+    state.legalMoves = [];
+    renderBoard();
+  }
+}
+
+function initDrawState() {
+  const key = positionKey(state.board, state.sideToMove);
+  state.positionCounts = new Map([[key, 1]]);
+  state.checkStreak = { side: null, count: 0 };
+}
+
+function rebuildDrawState() {
+  const counts = new Map();
+  let checkStreak = { side: null, count: 0 };
+  const snapshots = state.history.map((entry) => ({
+    board: entry.board,
+    sideToMove: entry.sideToMove,
+  }));
+  snapshots.push({ board: state.board, sideToMove: state.sideToMove });
+
+  let first = true;
+  for (const snap of snapshots) {
+    const key = positionKey(snap.board, snap.sideToMove);
+    counts.set(key, (counts.get(key) || 0) + 1);
+
+    if (!first) {
+      const inCheck = isInCheck(snap.board, snap.sideToMove);
+      if (inCheck) {
+        const checkingSide = opposite(snap.sideToMove);
+        if (checkStreak.side === checkingSide) checkStreak.count += 1;
+        else checkStreak = { side: checkingSide, count: 1 };
+      } else {
+        checkStreak = { side: null, count: 0 };
+      }
+    }
+    first = false;
+  }
+
+  state.positionCounts = counts;
+  state.checkStreak = checkStreak;
+}
+
+function updateDrawState() {
+  const key = positionKey(state.board, state.sideToMove);
+  const count = (state.positionCounts.get(key) || 0) + 1;
+  state.positionCounts.set(key, count);
+
+  const inCheck = isInCheck(state.board, state.sideToMove);
+  if (inCheck) {
+    const checkingSide = opposite(state.sideToMove);
+    if (state.checkStreak.side === checkingSide) state.checkStreak.count += 1;
+    else state.checkStreak = { side: checkingSide, count: 1 };
+  } else {
+    state.checkStreak = { side: null, count: 0 };
+  }
+
+  if (count >= REPETITION_LIMIT) return 'repetition';
+  if (state.checkStreak.count >= LONG_CHECK_LIMIT) return 'perpetual';
+  return null;
+}
+
+function wouldRepeatPosition(board, side) {
+  const key = positionKey(board, side);
+  const count = (state.positionCounts.get(key) || 0) + 1;
+  return count >= REPETITION_LIMIT;
+}
+
+function filterRepetitionMoves(board, side, moves) {
+  if (!moves || moves.length === 0) return [];
+  const safe = moves.filter((move) => !wouldRepeatPosition(makeMove(board, move), opposite(side)));
+  return safe.length ? safe : moves;
+}
+
+function announceGameOver(status) {
+  if (status.winner === 'r') {
+    if (status.reason === 'no_moves') {
+      setStatus('红方胜 (无子可走)');
+    } else {
+      setStatus('红方胜 (将死)');
+    }
+    playCheckmateSound();
+  } else if (status.winner === 'b') {
+    if (status.reason === 'no_moves') {
+      setStatus('黑方胜 (无子可走)');
+    } else {
+      setStatus('黑方胜 (将死)');
+    }
+    playCheckmateSound();
+  } else {
+    setStatus('和棋');
+  }
+}
+
+function commitMove(move, meta = {}) {
+  const { byAI = false } = meta;
+  state.history.push({
+    board: state.board,
+    sideToMove: state.sideToMove,
+    lastMove: state.lastMove,
+    lastMoveByAI: state.lastMoveByAI,
+  });
+  state.board = makeMove(state.board, move);
+  state.sideToMove = opposite(state.sideToMove);
+  state.selected = null;
+  state.legalMoves = [];
+  state.lastMove = move;
+  state.lastMoveByAI = byAI;
+
+  const status = gameStatus(state.board, state.sideToMove);
+  state.gameOver = status.over;
+
+  if (!status.over) {
+    const drawReason = updateDrawState();
+    if (drawReason) {
+      state.gameOver = true;
+      setStatus(drawReason === 'repetition' ? '和棋 (重复局面)' : '和棋 (长将)');
+      renderBoard();
+      return;
+    }
+  }
+
+  if (status.over) {
+    announceGameOver(status);
+  } else {
+    setTurnStatus();
+  }
+
+  renderBoard();
+
+  if (!state.gameOver && state.autoPlay && state.aiSide[state.sideToMove]) {
+    requestAIMove();
+  }
+}
+
+async function requestPythonMove(board, side, depth, timeLimitMs) {
+  const baseUrl = getBackendBaseUrl();
+  const sims = pythonSimsForDepth(depth);
+  const payload = {
+    board,
+    side,
+    sims,
+    temperature: 0.0,
+    useBook: state.useOpeningBook,
+    timeLimitMs,
+  };
+
+  const controller = new AbortController();
+  const timeoutMs = Math.max(15000, timeLimitMs * 6 || 0);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(`${baseUrl}/ai/move`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      return { ok: false };
+    }
+    const data = await res.json();
+    if (!data || typeof data !== 'object' || !('move' in data)) {
+      return { ok: false };
+    }
+    if (!data.move) {
+      return { ok: true, move: null };
+    }
+    return { ok: true, move: { from: data.move.from, to: data.move.to } };
+  } catch (err) {
+    return { ok: false };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function setBackendStatus(stateLabel, detail) {
+  if (!backendStatusEl) return;
+  const bookTag = state.lastBookMove ? ' · 开局库' : '';
+  backendStatusEl.textContent = `后端状态：${stateLabel}${detail ? ' · ' + detail : ''}${bookTag}`;
+  backendStatusEl.classList.remove('good', 'bad');
+  if (stateLabel === '在线') backendStatusEl.classList.add('good');
+  if (stateLabel === '离线') backendStatusEl.classList.add('bad');
+}
+
+async function refreshBackendStatus() {
+  if (!backendStatusEl) return;
+  const baseUrl = getBackendBaseUrl();
+  try {
+    const res = await fetch(`${baseUrl}/health`);
+    if (!res.ok) throw new Error('bad');
+    const data = await res.json();
+    const device = data && data.device ? `device ${data.device}` : '';
+    state.backendOnline = true;
+    state.backendDevice = device;
+    setBackendStatus('在线', device);
+    if (statusEl && statusEl.textContent.includes('后端')) {
+      setTurnStatus();
+    }
+  } catch (err) {
+    state.backendOnline = false;
+    state.backendDevice = '';
+    state.lastBookMove = false;
+    setBackendStatus('离线', '未连接');
+  }
+}
+
+function setPythonTrainControls(running) {
+  if (pyTrainStartEl) pyTrainStartEl.disabled = running;
+  if (pyTrainStopEl) pyTrainStopEl.disabled = !running;
+}
+
+const PYTHON_LOG_MAX_LINES = 2;
+
+function parsePythonTrainProgress(lines) {
+  if (!Array.isArray(lines)) return null;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const match = lines[i].match(/iter\s*(\d+)\s*\/\s*(\d+)/i);
+    if (match) {
+      return { current: parseInt(match[1], 10), total: parseInt(match[2], 10) };
+    }
+  }
+  return null;
+}
+
+function updatePythonTrainProgress(lines, config, running) {
+  if (!running) {
+    pythonTrainRunning = false;
+    pythonTrainStartTime = null;
+    pythonTrainProgress = { current: 0, total: 0 };
+    return;
+  }
+
+  pythonTrainRunning = true;
+  const parsed = parsePythonTrainProgress(lines);
+  if (parsed) {
+    pythonTrainProgress = parsed;
+  } else if (config && typeof config.iterations === 'number') {
+    pythonTrainProgress = { ...pythonTrainProgress, total: config.iterations };
+  }
+
+  if (!pythonTrainStartTime) {
+    pythonTrainStartTime = performance.now();
+  }
+}
+
+function getPythonTrainEtaText() {
+  if (!pythonTrainRunning) return '';
+  if (!pythonTrainStartTime || pythonTrainProgress.current <= 0 || pythonTrainProgress.total <= 0) {
+    return '预计剩余：估算中';
+  }
+  const elapsed = Math.max(0.001, (performance.now() - pythonTrainStartTime) / 1000);
+  if (elapsed < 2) return '预计剩余：估算中';
+  const rate = pythonTrainProgress.current / elapsed;
+  if (!Number.isFinite(rate) || rate <= 0) return '预计剩余：估算中';
+  const remaining = Math.max(0, pythonTrainProgress.total - pythonTrainProgress.current);
+  return `预计剩余：${formatDuration(remaining / rate)}`;
+}
+
+function renderPythonTrainLog() {
+  if (!pyTrainLogEl) return;
+  pyTrainLogEl.textContent = pythonTrainLogLines.join('\n');
+
+  if (pyTrainLogMetaEl) {
+    const eta = getPythonTrainEtaText();
+    pyTrainLogMetaEl.textContent = eta || '';
+  }
+}
+
+function setPythonTrainLog(value) {
+  if (Array.isArray(value)) {
+    pythonTrainLogLines = value.slice();
+  } else if (value) {
+    pythonTrainLogLines = String(value).split('\n');
+  } else {
+    pythonTrainLogLines = [];
+  }
+  renderPythonTrainLog();
+}
+
+async function fetchPythonTrainStatus() {
+  if (!pyTrainLogEl) return null;
+  const baseUrl = getBackendBaseUrl();
+  try {
+    const res = await fetch(`${baseUrl}/train/status`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    return await res.json();
+  } catch (err) {
+    setPythonTrainLog('无法连接训练后端。');
+    return null;
+  }
+}
+
+function startPythonTrainPolling() {
+  if (pythonTrainTimer) return;
+  pythonTrainTimer = setInterval(async () => {
+    const status = await fetchPythonTrainStatus();
+    if (!status) return;
+    updatePythonTrainProgress(status.lines, status.config, Boolean(status.running));
+    if (Array.isArray(status.lines) && status.lines.length) {
+      setPythonTrainLog(status.lines);
+    } else if (status.running) {
+      setPythonTrainLog('训练中（首轮耗时较长，请耐心等待…）');
+    }
+    setPythonTrainControls(Boolean(status.running));
+    if (!status.running) {
+      stopPythonTrainPolling();
+    }
+  }, 2000);
+}
+
+function stopPythonTrainPolling() {
+  if (pythonTrainTimer) {
+    clearInterval(pythonTrainTimer);
+    pythonTrainTimer = null;
+  }
+}
+
+function readPythonTrainInputs() {
+  const iterations = clampInt(pyTrainItersEl?.value, 1, 5000, pythonTrainConfig.iterations);
+  const gamesPerIter = clampInt(pyTrainGamesEl?.value, 1, 200, pythonTrainConfig.gamesPerIter);
+  const simulations = clampInt(pyTrainSimsEl?.value, 32, 4000, pythonTrainConfig.simulations);
+  const lr = clampFloat(pyTrainLrEl?.value, 0.0005, 0.01, pythonTrainConfig.lr);
+  const batchSize = clampInt(pyTrainBatchEl?.value, 16, 512, pythonTrainConfig.batchSize);
+  const epochs = clampInt(pyTrainEpochsEl?.value, 1, 6, pythonTrainConfig.epochs);
+  const bufferSize = clampInt(pyTrainBufferEl?.value, 2000, 50000, pythonTrainConfig.bufferSize);
+
+  if (pyTrainItersEl) pyTrainItersEl.value = iterations;
+  if (pyTrainGamesEl) pyTrainGamesEl.value = gamesPerIter;
+  if (pyTrainSimsEl) pyTrainSimsEl.value = simulations;
+  if (pyTrainLrEl) pyTrainLrEl.value = lr;
+  if (pyTrainBatchEl) pyTrainBatchEl.value = batchSize;
+  if (pyTrainEpochsEl) pyTrainEpochsEl.value = epochs;
+  if (pyTrainBufferEl) pyTrainBufferEl.value = bufferSize;
+
+  savePythonTrainConfig({ iterations, gamesPerIter, simulations, lr, batchSize, epochs, bufferSize });
+  return { iterations, gamesPerIter, simulations, lr, batchSize, epochs, bufferSize };
+}
+
+async function startPythonTraining() {
+  if (!pyTrainStartEl) return;
+  const { iterations, gamesPerIter, simulations, lr, batchSize, epochs, bufferSize } = readPythonTrainInputs();
+  pythonTrainStartTime = performance.now();
+  pythonTrainProgress = { current: 0, total: iterations };
+  pythonTrainRunning = true;
+  setPythonTrainControls(true);
+  setPythonTrainLog('正在启动 Python 训练…');
+  const baseUrl = getBackendBaseUrl();
+  try {
+    const res = await fetch(`${baseUrl}/train/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        iterations,
+        games_per_iter: gamesPerIter,
+        simulations,
+        lr,
+        batch_size: batchSize,
+        epochs,
+        buffer_size: bufferSize,
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    startPythonTrainPolling();
+  } catch (err) {
+    setPythonTrainControls(false);
+    setPythonTrainLog('启动训练失败，请确认后端已启动。');
+  }
+}
+
+async function stopPythonTraining() {
+  if (!pyTrainStopEl) return;
+  const baseUrl = getBackendBaseUrl();
+  try {
+    await fetch(`${baseUrl}/train/stop`, { method: 'POST' });
+    setPythonTrainLog('已请求停止训练，等待进程退出…');
+  } catch (err) {
+    setPythonTrainLog('停止训练失败，请确认后端可访问。');
+  }
+}
+
+async function initPythonTrainingUI() {
+  if (!pyTrainLogEl) return;
+  const status = await fetchPythonTrainStatus();
+  if (!status) return;
+  updatePythonTrainProgress(status.lines, status.config, Boolean(status.running));
+  if (Array.isArray(status.lines) && status.lines.length) {
+    setPythonTrainLog(status.lines);
+  } else if (status.running) {
+    setPythonTrainLog('训练中（首轮耗时较长，请耐心等待…）');
+  }
+  setPythonTrainControls(Boolean(status.running));
+  if (status.running) {
+    startPythonTrainPolling();
+  }
+}
+
+function requestAIMove() {
+  if (state.aiThinking || state.gameOver) return;
+  state.aiThinking = true;
+
+  const depth = parseInt(depthEl.value, 10);
+  const timeLimitMs = AI_TIME_LIMITS[depth] || 700;
+  setStatus('Python AI 思考中…');
+
+  const boardSnapshot = state.board;
+  const sideSnapshot = state.sideToMove;
+
+  setTimeout(async () => {
+    if (state.board !== boardSnapshot || state.sideToMove !== sideSnapshot || state.gameOver) {
+      state.aiThinking = false;
+      return;
+    }
+
+    const pythonResult = await requestPythonMove(state.board, state.sideToMove, depth, timeLimitMs);
+    if (!pythonResult || !pythonResult.ok) {
+      state.aiThinking = false;
+      state.backendOnline = false;
+      state.backendDevice = '';
+      state.lastBookMove = false;
+      setBackendStatus('离线', '走子失败');
+      setStatus('后端不可用');
+      return;
+    }
+    state.lastBookMove = Boolean(pythonResult.book);
+    if (state.backendOnline) {
+      setBackendStatus('在线', state.backendDevice || '');
+    }
+    if (!pythonResult.move) {
+      state.aiThinking = false;
+      const status = gameStatus(state.board, state.sideToMove);
+      if (status.over) {
+        state.gameOver = true;
+        announceGameOver(status);
+        renderBoard();
+      } else {
+        setStatus('后端未返回着法');
+      }
+      return;
+    }
+    state.aiThinking = false;
+    commitMove(pythonResult.move, { byAI: true });
+  }, 30);
+}
+
+function resetGame() {
+  state.board = initialBoard();
+  state.sideToMove = 'r';
+  state.selected = null;
+  state.legalMoves = [];
+  state.history = [];
+  state.lastMove = null;
+  state.lastMoveByAI = false;
+  state.gameOver = false;
+  state.useOpeningBook = openingBookEl ? openingBookEl.checked : true;
+  initDrawState();
+  if (state.backendOnline) {
+    setStatus('新对局开始：红方先走');
+  } else {
+    setStatus('后端检测中…');
+  }
+  renderBoard();
+  if (state.autoPlay && state.aiSide[state.sideToMove]) {
+    requestAIMove();
+  }
+}
+
+function undoMove() {
+  const last = state.history.pop();
+  if (!last) return;
+  state.board = last.board;
+  state.sideToMove = last.sideToMove;
+  state.lastMove = last.lastMove;
+  state.lastMoveByAI = last.lastMoveByAI || false;
+  state.selected = null;
+  state.legalMoves = [];
+  state.gameOver = false;
+  rebuildDrawState();
+  setTurnStatus();
+  renderBoard();
+}
+
+function bindControls() {
+  aiRedEl.addEventListener('change', () => {
+    state.aiSide.r = aiRedEl.checked;
+    if (state.autoPlay && state.aiSide[state.sideToMove]) requestAIMove();
+  });
+
+  aiBlackEl.addEventListener('change', () => {
+    state.aiSide.b = aiBlackEl.checked;
+    if (state.autoPlay && state.aiSide[state.sideToMove]) requestAIMove();
+  });
+
+  autoPlayEl.addEventListener('change', () => {
+    state.autoPlay = autoPlayEl.checked;
+    if (state.autoPlay && state.aiSide[state.sideToMove]) requestAIMove();
+  });
+
+  if (openingBookEl) {
+    state.useOpeningBook = openingBookEl.checked;
+    openingBookEl.addEventListener('change', () => {
+      state.useOpeningBook = openingBookEl.checked;
+    });
+  }
+
+  if (pyTrainItersEl) {
+    pyTrainItersEl.value = pythonTrainConfig.iterations;
+    pyTrainItersEl.addEventListener('change', () => {
+      const iterations = clampInt(pyTrainItersEl.value, 1, 5000, pythonTrainConfig.iterations);
+      pyTrainItersEl.value = iterations;
+      savePythonTrainConfig({ iterations });
+    });
+  }
+
+  if (pyTrainGamesEl) {
+    pyTrainGamesEl.value = pythonTrainConfig.gamesPerIter;
+    pyTrainGamesEl.addEventListener('change', () => {
+      const gamesPerIter = clampInt(pyTrainGamesEl.value, 1, 200, pythonTrainConfig.gamesPerIter);
+      pyTrainGamesEl.value = gamesPerIter;
+      savePythonTrainConfig({ gamesPerIter });
+    });
+  }
+
+  if (pyTrainSimsEl) {
+    pyTrainSimsEl.value = pythonTrainConfig.simulations;
+    pyTrainSimsEl.addEventListener('change', () => {
+      const simulations = clampInt(pyTrainSimsEl.value, 32, 4000, pythonTrainConfig.simulations);
+      pyTrainSimsEl.value = simulations;
+      savePythonTrainConfig({ simulations });
+    });
+  }
+
+  if (pyTrainAdvancedEl && pyTrainAdvancedPanelEl) {
+    pyTrainAdvancedEl.checked = Boolean(pythonTrainConfig.advanced);
+    pyTrainAdvancedPanelEl.hidden = !pyTrainAdvancedEl.checked;
+    pyTrainAdvancedEl.addEventListener('change', () => {
+      const enabled = pyTrainAdvancedEl.checked;
+      pyTrainAdvancedPanelEl.hidden = !enabled;
+      savePythonTrainConfig({ advanced: enabled });
+    });
+  }
+
+  if (pyTrainPresetEl) {
+    const presetValue = pythonTrainConfig.preset || 'balanced';
+    pyTrainPresetEl.value = presetValue;
+    pyTrainPresetEl.addEventListener('change', () => {
+      const key = pyTrainPresetEl.value;
+      if (key === 'custom') {
+        savePythonTrainConfig({ preset: 'custom' });
+        return;
+      }
+      applyPythonTrainPreset(key);
+    });
+  }
+
+  if (pyTrainLrEl) {
+    pyTrainLrEl.value = pythonTrainConfig.lr;
+    pyTrainLrEl.addEventListener('change', () => {
+      const lr = clampFloat(pyTrainLrEl.value, 0.0005, 0.01, pythonTrainConfig.lr);
+      pyTrainLrEl.value = lr;
+      savePythonTrainConfig({ lr });
+      setPresetCustom();
+    });
+  }
+
+  if (pyTrainBatchEl) {
+    pyTrainBatchEl.value = pythonTrainConfig.batchSize;
+    pyTrainBatchEl.addEventListener('change', () => {
+      const batchSize = clampInt(pyTrainBatchEl.value, 16, 512, pythonTrainConfig.batchSize);
+      pyTrainBatchEl.value = batchSize;
+      savePythonTrainConfig({ batchSize });
+      setPresetCustom();
+    });
+  }
+
+  if (pyTrainEpochsEl) {
+    pyTrainEpochsEl.value = pythonTrainConfig.epochs;
+    pyTrainEpochsEl.addEventListener('change', () => {
+      const epochs = clampInt(pyTrainEpochsEl.value, 1, 6, pythonTrainConfig.epochs);
+      pyTrainEpochsEl.value = epochs;
+      savePythonTrainConfig({ epochs });
+      setPresetCustom();
+    });
+  }
+
+  if (pyTrainBufferEl) {
+    pyTrainBufferEl.value = pythonTrainConfig.bufferSize;
+    pyTrainBufferEl.addEventListener('change', () => {
+      const bufferSize = clampInt(pyTrainBufferEl.value, 2000, 50000, pythonTrainConfig.bufferSize);
+      pyTrainBufferEl.value = bufferSize;
+      savePythonTrainConfig({ bufferSize });
+      setPresetCustom();
+    });
+  }
+
+  if (pyTrainStartEl) {
+    pyTrainStartEl.addEventListener('click', startPythonTraining);
+  }
+
+  if (pyTrainStopEl) {
+    pyTrainStopEl.addEventListener('click', stopPythonTraining);
+  }
+
+  if (pyTrainLogToggleEl) {
+    pyTrainLogToggleEl.addEventListener('click', () => {
+      pythonTrainLogExpanded = !pythonTrainLogExpanded;
+      renderPythonTrainLog();
+    });
+  }
+
+  newGameEl.addEventListener('click', resetGame);
+  undoEl.addEventListener('click', undoMove);
+  aiMoveEl.addEventListener('click', () => {
+    if (!state.aiSide[state.sideToMove]) {
+      state.aiSide[state.sideToMove] = true;
+      if (state.sideToMove === 'r') aiRedEl.checked = true;
+      else aiBlackEl.checked = true;
+    }
+    requestAIMove();
+  });
+
+  window.addEventListener('resize', renderTrace);
+}
+
+createBoard();
+bindControls();
+refreshBackendStatus();
+setInterval(refreshBackendStatus, 6000);
+initPythonTrainingUI();
+renderPythonTrainLog();
+resetGame();

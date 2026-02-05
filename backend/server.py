@@ -1,0 +1,289 @@
+from __future__ import annotations
+
+from collections import deque
+from pathlib import Path
+import subprocess
+import sys
+import threading
+from typing import Deque, Dict, List, Optional
+
+import torch
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from .engine import Board
+from .encoding import action_to_move
+from .model import XiangqiNet
+from .mcts import MCTSConfig, run_mcts, select_action, visit_counts
+from .opening_book import opening_book_move
+
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+CHECKPOINT_PATH = BASE_DIR / "backend" / "checkpoints" / "latest.pt"
+TRAIN_LOG_LIMIT = 120
+
+MODEL_LOCK = threading.Lock()
+
+
+class MoveRequest(BaseModel):
+    board: List[Optional[str]] = Field(..., min_length=90, max_length=90)
+    side: str
+    sims: int = 320
+    temperature: float = 0.0
+    timeLimitMs: int = 0
+    useBook: bool = True
+
+
+class MoveResponse(BaseModel):
+    move: Optional[dict]
+    stats: dict
+
+
+class TrainStartRequest(BaseModel):
+    iterations: int = 200
+    games_per_iter: int = 8
+    selfplay_workers: int = 4
+    simulations: int = 320
+    max_moves: int = 220
+    temperature_moves: int = 12
+    batch_size: int = 128
+    epochs: int = 2
+    buffer_size: int = 12000
+    lr: float = 2e-3
+
+
+def get_device() -> torch.device:
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def load_model(device: torch.device) -> XiangqiNet:
+    model = XiangqiNet().to(device)
+    if CHECKPOINT_PATH.exists():
+        data = torch.load(CHECKPOINT_PATH, map_location="cpu")
+        model.load_state_dict(data.get("model", data))
+    model.eval()
+    return model
+
+
+def reload_model() -> bool:
+    global MODEL
+    if not CHECKPOINT_PATH.exists():
+        return False
+    with MODEL_LOCK:
+        MODEL = load_model(DEVICE)
+    return True
+
+
+def validate_board(board: List[Optional[str]]) -> Board:
+    if len(board) != 90:
+        raise ValueError("board must have length 90")
+    allowed = set(["K", "A", "B", "N", "R", "C", "P", "k", "a", "b", "n", "r", "c", "p"])
+    normalized: Board = []
+    for piece in board:
+        if piece is None:
+            normalized.append(None)
+            continue
+        if piece not in allowed:
+            raise ValueError(f"invalid piece: {piece}")
+        normalized.append(piece)
+    return normalized
+
+
+class TrainingManager:
+    def __init__(self) -> None:
+        self.process: Optional[subprocess.Popen] = None
+        self.reader: Optional[threading.Thread] = None
+        self.lines: Deque[str] = deque(maxlen=TRAIN_LOG_LIMIT)
+        self.running = False
+        self.last_exit_code: Optional[int] = None
+        self.config: Dict[str, float] = {}
+        self.error: Optional[str] = None
+
+    def start(self, config: TrainStartRequest) -> bool:
+        if self.process and self.process.poll() is None:
+            return False
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "backend.train",
+            "--iterations",
+            str(config.iterations),
+            "--games-per-iter",
+            str(config.games_per_iter),
+            "--selfplay-workers",
+            str(config.selfplay_workers),
+            "--simulations",
+            str(config.simulations),
+            "--max-moves",
+            str(config.max_moves),
+            "--temperature-moves",
+            str(config.temperature_moves),
+            "--batch-size",
+            str(config.batch_size),
+            "--epochs",
+            str(config.epochs),
+            "--buffer-size",
+            str(config.buffer_size),
+            "--lr",
+            str(config.lr),
+        ]
+
+        self.process = subprocess.Popen(
+            cmd,
+            cwd=BASE_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self.lines.clear()
+        self.config = config.dict()
+        self.error = None
+        self.running = True
+        self.lines.append("训练已启动，正在自我对弈生成数据…")
+        self.last_exit_code = None
+        self.reader = threading.Thread(target=self._read_output, daemon=True)
+        self.reader.start()
+        return True
+
+    def _read_output(self) -> None:
+        assert self.process is not None
+        stdout = self.process.stdout
+        try:
+            if stdout:
+                for line in stdout:
+                    self.lines.append(line.rstrip())
+        except Exception as exc:  # pragma: no cover - best effort
+            self.error = str(exc)
+        finally:
+            code = self.process.wait()
+            self.last_exit_code = code
+            self.running = False
+            if code == 0:
+                if reload_model():
+                    self.lines.append("训练完成，模型已自动加载。")
+                else:
+                    self.lines.append("训练完成，但未找到模型文件。")
+            else:
+                self.lines.append(f"训练退出 code={code}")
+
+    def stop(self) -> bool:
+        if not self.process or self.process.poll() is not None:
+            return False
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+        return True
+
+    def status(self) -> Dict[str, object]:
+        return {
+            "running": self.running,
+            "exitCode": self.last_exit_code,
+            "lines": list(self.lines),
+            "config": self.config,
+            "error": self.error,
+            "pid": getattr(self.process, "pid", None),
+        }
+
+
+app = FastAPI(title="Xiangqi Neural Backend")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DEVICE = get_device()
+MODEL = load_model(DEVICE)
+TRAINER = TrainingManager()
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "device": str(DEVICE)}
+
+
+@app.get("/")
+def root() -> dict:
+    return {"status": "ok", "message": "Xiangqi backend running", "device": str(DEVICE)}
+
+
+@app.post("/ai/move", response_model=MoveResponse)
+def ai_move(req: MoveRequest):
+    try:
+        board = validate_board(req.board)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    side = req.side
+    if side not in ("r", "b"):
+        raise HTTPException(status_code=400, detail="side must be 'r' or 'b'")
+
+    if req.useBook:
+        book_move = opening_book_move(board, side)
+        if book_move:
+            return {
+                "move": {"from": book_move.from_idx, "to": book_move.to_idx},
+                "stats": {"sims": 0, "visits": 0, "book": True},
+            }
+
+    config = MCTSConfig(simulations=max(16, min(req.sims, 4000)))
+    with MODEL_LOCK:
+        root = run_mcts(MODEL, board, side, config, DEVICE)
+        action = select_action(root, req.temperature)
+        visits = visit_counts(root)
+
+    if action is None:
+        return {"move": None, "stats": {"sims": config.simulations, "visits": 0, "book": False}}
+
+    move = action_to_move(action)
+    return {
+        "move": {"from": move.from_idx, "to": move.to_idx},
+        "stats": {"sims": config.simulations, "visits": visits.get(action, 0), "book": False},
+    }
+
+
+@app.post("/train/start")
+def train_start(req: TrainStartRequest):
+    if not TRAINER.start(req):
+        raise HTTPException(status_code=409, detail="training already running")
+    return {"status": "started"}
+
+
+@app.post("/train/stop")
+def train_stop():
+    if TRAINER.stop():
+        return {"status": "stopping"}
+    return {"status": "idle"}
+
+
+@app.get("/train/status")
+def train_status():
+    return TRAINER.status()
+
+
+@app.post("/model/reload")
+def model_reload():
+    if reload_model():
+        return {"status": "reloaded"}
+    return {"status": "missing"}
+
+
+def main() -> None:
+    import uvicorn
+
+    uvicorn.run("backend.server:app", host="127.0.0.1", port=8001, reload=False)
+
+
+if __name__ == "__main__":
+    main()
