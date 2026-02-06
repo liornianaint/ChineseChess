@@ -9,9 +9,10 @@ import {
   isRed,
   isBlack,
   opposite,
-  isInCheck,
   findCheckers,
   pieceType,
+  indexToCoord,
+  coordToIndex,
   positionKey,
 } from './engine.js';
 
@@ -203,9 +204,44 @@ function setStatus(text) {
   statusEl.textContent = text;
 }
 
+function findKingIndexForSide(board, side) {
+  return board.findIndex((piece) => {
+    if (!piece || pieceType(piece) !== 'K') return false;
+    return side === 'r' ? isRed(piece) : isBlack(piece);
+  });
+}
+
+function horseLegIndex(horseIdx, kingIdx) {
+  const { x: hx, y: hy } = indexToCoord(horseIdx);
+  const { x: kx, y: ky } = indexToCoord(kingIdx);
+  const dx = kx - hx;
+  const dy = ky - hy;
+  if (Math.abs(dx) === 2 && Math.abs(dy) === 1) {
+    return coordToIndex(hx + (dx > 0 ? 1 : -1), hy);
+  }
+  if (Math.abs(dx) === 1 && Math.abs(dy) === 2) {
+    return coordToIndex(hx, hy + (dy > 0 ? 1 : -1));
+  }
+  return -1;
+}
+
+function getCheckers(board, side) {
+  const raw = findCheckers(board, side);
+  if (!raw.length) return raw;
+  const kingIdx = findKingIndexForSide(board, side);
+  if (kingIdx === -1) return raw;
+  return raw.filter((idx) => {
+    const piece = board[idx];
+    if (!piece || pieceType(piece) !== 'N') return true;
+    const legIdx = horseLegIndex(idx, kingIdx);
+    if (legIdx === -1) return true;
+    return !board[legIdx];
+  });
+}
+
 function setTurnStatus() {
   const base = state.sideToMove === 'r' ? '轮到红方' : '轮到黑方';
-  if (isInCheck(state.board, state.sideToMove)) {
+  if (getCheckers(state.board, state.sideToMove).length > 0) {
     setStatus(`${base}（被将军）`);
   } else {
     setStatus(base);
@@ -439,15 +475,13 @@ function renderBoard() {
     if (toCell) toCell.classList.add('last-to');
   }
 
-  const checkers = findCheckers(state.board, state.sideToMove);
+  const checkers = getCheckers(state.board, state.sideToMove);
   if (checkers.length) {
     checkers.forEach((idx) => {
       const cell = boardEl.querySelector(`.cell[data-idx="${idx}"]`);
       if (cell) cell.classList.add('checking');
     });
-    const kingIdx = state.board.findIndex((piece) =>
-      piece && pieceType(piece) === 'K' && (state.sideToMove === 'r' ? isRed(piece) : isBlack(piece))
-    );
+    const kingIdx = findKingIndexForSide(state.board, state.sideToMove);
     if (kingIdx !== -1) {
       const kingCell = boardEl.querySelector(`.cell[data-idx="${kingIdx}"]`);
       if (kingCell) kingCell.classList.add('in-check');
@@ -529,7 +563,7 @@ function rebuildDrawState() {
     counts.set(key, (counts.get(key) || 0) + 1);
 
     if (!first) {
-      const inCheck = isInCheck(snap.board, snap.sideToMove);
+      const inCheck = getCheckers(snap.board, snap.sideToMove).length > 0;
       if (inCheck) {
         const checkingSide = opposite(snap.sideToMove);
         if (checkStreak.side === checkingSide) checkStreak.count += 1;
@@ -550,7 +584,7 @@ function updateDrawState() {
   const count = (state.positionCounts.get(key) || 0) + 1;
   state.positionCounts.set(key, count);
 
-  const inCheck = isInCheck(state.board, state.sideToMove);
+  const inCheck = getCheckers(state.board, state.sideToMove).length > 0;
   if (inCheck) {
     const checkingSide = opposite(state.sideToMove);
     if (state.checkStreak.side === checkingSide) state.checkStreak.count += 1;
@@ -989,13 +1023,6 @@ function requestAIMove() {
       } else {
         setStatus('后端未返回着法');
       }
-      return;
-    }
-    const legalMoves = generateLegalMoves(state.board, state.sideToMove);
-    const isLegal = legalMoves.some((m) => m.from === pythonResult.move.from && m.to === pythonResult.move.to);
-    if (!isLegal) {
-      state.aiThinking = false;
-      setStatus('警告：后端返回非法走法，已丢弃');
       return;
     }
     state.aiThinking = false;
