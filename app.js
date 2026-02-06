@@ -34,7 +34,7 @@ const DEFAULT_PYTHON_TRAIN = {
 const PYTHON_TRAIN_PRESETS = {
   balanced: { lr: 0.002, batchSize: 128, epochs: 2, bufferSize: 15000 },
   speed: { lr: 0.003, batchSize: 96, epochs: 1, bufferSize: 10000 },
-  strong: { lr: 0.0015, batchSize: 192, epochs: 3, bufferSize: 20000 },
+  strong: { lr: 0.001, batchSize: 192, epochs: 3, bufferSize: 20000 },
 };
 const REPETITION_LIMIT = 3;
 const LONG_CHECK_LIMIT = 6;
