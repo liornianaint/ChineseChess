@@ -13,8 +13,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .engine import Board
-from .encoding import action_to_move
+from .engine import Board, generate_legal_moves, position_key
+from .encoding import action_to_move, move_to_action
 from .model import XiangqiNet
 from .mcts import MCTSConfig, run_mcts, select_action, visit_counts
 from .opening_book import opening_book_move
@@ -25,6 +25,12 @@ CHECKPOINT_PATH = BASE_DIR / "backend" / "checkpoints" / "latest.pt"
 TRAIN_LOG_LIMIT = 120
 
 MODEL_LOCK = threading.Lock()
+MODEL_INFO: Dict[str, Optional[object]] = {
+    "loaded": False,
+    "step": None,
+    "mtime": None,
+    "path": str(CHECKPOINT_PATH),
+}
 
 
 class MoveRequest(BaseModel):
@@ -42,15 +48,15 @@ class MoveResponse(BaseModel):
 
 
 class TrainStartRequest(BaseModel):
-    iterations: int = 200
-    games_per_iter: int = 8
+    iterations: int = 600
+    games_per_iter: int = 12
     selfplay_workers: int = 4
-    simulations: int = 320
+    simulations: int = 480
     max_moves: int = 220
     temperature_moves: int = 12
     batch_size: int = 128
     epochs: int = 2
-    buffer_size: int = 12000
+    buffer_size: int = 15000
     lr: float = 2e-3
 
 
@@ -63,10 +69,26 @@ def get_device() -> torch.device:
 
 
 def load_model(device: torch.device) -> XiangqiNet:
+    global MODEL_INFO
     model = XiangqiNet().to(device)
     if CHECKPOINT_PATH.exists():
         data = torch.load(CHECKPOINT_PATH, map_location="cpu")
         model.load_state_dict(data.get("model", data))
+        step = int(data.get("step", 0)) if isinstance(data, dict) else 0
+        mtime = CHECKPOINT_PATH.stat().st_mtime
+        MODEL_INFO = {
+            "loaded": True,
+            "step": step,
+            "mtime": mtime,
+            "path": str(CHECKPOINT_PATH),
+        }
+    else:
+        MODEL_INFO = {
+            "loaded": False,
+            "step": None,
+            "mtime": None,
+            "path": str(CHECKPOINT_PATH),
+        }
     model.eval()
     return model
 
@@ -74,6 +96,9 @@ def load_model(device: torch.device) -> XiangqiNet:
 def reload_model() -> bool:
     global MODEL
     if not CHECKPOINT_PATH.exists():
+        MODEL_INFO["loaded"] = False
+        MODEL_INFO["step"] = None
+        MODEL_INFO["mtime"] = None
         return False
     with MODEL_LOCK:
         MODEL = load_model(DEVICE)
@@ -185,6 +210,10 @@ class TrainingManager:
             self.process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             self.process.kill()
+        if reload_model():
+            self.lines.append("训练已停止，模型已自动加载。")
+        else:
+            self.lines.append("训练已停止，但未找到模型文件。")
         return True
 
     def status(self) -> Dict[str, object]:
@@ -213,9 +242,14 @@ MODEL = load_model(DEVICE)
 TRAINER = TrainingManager()
 
 
+@app.on_event("startup")
+def _startup_load_model() -> None:
+    reload_model()
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "device": str(DEVICE)}
+    return {"status": "ok", "device": str(DEVICE), "model": MODEL_INFO}
 
 
 @app.get("/")
@@ -239,7 +273,7 @@ def ai_move(req: MoveRequest):
         if book_move:
             return {
                 "move": {"from": book_move.from_idx, "to": book_move.to_idx},
-                "stats": {"sims": 0, "visits": 0, "book": True},
+                "stats": {"sims": 0, "visits": 0, "book": True, "boardKey": position_key(board, side)},
             }
 
     config = MCTSConfig(simulations=max(16, min(req.sims, 4000)))
@@ -248,13 +282,36 @@ def ai_move(req: MoveRequest):
         action = select_action(root, req.temperature)
         visits = visit_counts(root)
 
-    if action is None:
-        return {"move": None, "stats": {"sims": config.simulations, "visits": 0, "book": False}}
+    legal_moves = generate_legal_moves(board, side)
+    legal_actions = {move_to_action(m) for m in legal_moves}
+    used_fallback = False
+
+    if action is None or action not in legal_actions:
+        if legal_actions:
+            if visits:
+                best_action = max(legal_actions, key=lambda a: visits.get(a, 0))
+                if visits.get(best_action, 0) == 0:
+                    best_action = next(iter(legal_actions))
+            else:
+                best_action = next(iter(legal_actions))
+            action = best_action
+            used_fallback = True
+        else:
+            return {
+                "move": None,
+                "stats": {"sims": config.simulations, "visits": 0, "book": False, "boardKey": position_key(board, side)},
+            }
 
     move = action_to_move(action)
     return {
         "move": {"from": move.from_idx, "to": move.to_idx},
-        "stats": {"sims": config.simulations, "visits": visits.get(action, 0), "book": False},
+        "stats": {
+            "sims": config.simulations,
+            "visits": visits.get(action, 0),
+            "book": False,
+            "fallback": used_fallback,
+            "boardKey": position_key(board, side),
+        },
     }
 
 

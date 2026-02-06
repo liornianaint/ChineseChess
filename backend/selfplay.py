@@ -40,7 +40,7 @@ def self_play_game(model, config: SelfPlayConfig, device: torch.device) -> Tuple
 
         root = run_mcts(model, board, side, mcts, device, root=root, cache=cache)
         visits = visit_counts(root)
-        policy = visits_to_policy(visits)
+        policy = visits_to_policy(visits).astype(np.float16)
         temperature = 1.0 if move_idx < config.temperature_moves else 0.1
         action = select_action(root, temperature)
         if action is None:

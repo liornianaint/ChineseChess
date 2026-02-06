@@ -290,9 +290,15 @@ def is_square_attacked(board: Board, x: int, y: int, attacker_side: str) -> bool
     for dx, dy, lx, ly in HORSE_DIRS:
         hx = x + dx
         hy = y + dy
-        leg_x = x + lx
-        leg_y = y + ly
-        if not in_bounds(hx, hy) or not in_bounds(leg_x, leg_y):
+        if not in_bounds(hx, hy):
+            continue
+        if abs(hx - x) == 2:
+            leg_x = hx - (1 if hx > x else -1)
+            leg_y = hy
+        else:
+            leg_x = hx
+            leg_y = hy - (1 if hy > y else -1)
+        if not in_bounds(leg_x, leg_y):
             continue
         if board[coord_to_index(leg_x, leg_y)]:
             continue
@@ -409,9 +415,15 @@ def find_attackers(board: Board, x: int, y: int, attacker_side: str) -> List[int
     for dx, dy, lx, ly in HORSE_DIRS:
         hx = x + dx
         hy = y + dy
-        leg_x = x + lx
-        leg_y = y + ly
-        if not in_bounds(hx, hy) or not in_bounds(leg_x, leg_y):
+        if not in_bounds(hx, hy):
+            continue
+        if abs(hx - x) == 2:
+            leg_x = hx - (1 if hx > x else -1)
+            leg_y = hy
+        else:
+            leg_x = hx
+            leg_y = hy - (1 if hy > y else -1)
+        if not in_bounds(leg_x, leg_y):
             continue
         if board[coord_to_index(leg_x, leg_y)]:
             continue

@@ -16,24 +16,24 @@ import {
 } from './engine.js';
 
 const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8001';
-const PYTHON_TRAIN_KEY = 'xiangqi_python_train_cfg_v1';
+const PYTHON_TRAIN_KEY = 'xiangqi_python_train_cfg_v4';
 
 const DEFAULT_PYTHON_TRAIN = {
-  iterations: 200,
-  gamesPerIter: 8,
-  simulations: 320,
+  iterations: 600,
+  gamesPerIter: 12,
+  simulations: 480,
   lr: 0.002,
   batchSize: 128,
   epochs: 2,
-  bufferSize: 12000,
+  bufferSize: 15000,
   advanced: false,
   preset: 'balanced',
 };
 
 const PYTHON_TRAIN_PRESETS = {
-  balanced: { lr: 0.002, batchSize: 128, epochs: 2, bufferSize: 12000 },
-  speed: { lr: 0.003, batchSize: 64, epochs: 1, bufferSize: 8000 },
-  strong: { lr: 0.0015, batchSize: 192, epochs: 3, bufferSize: 18000 },
+  balanced: { lr: 0.002, batchSize: 128, epochs: 2, bufferSize: 15000 },
+  speed: { lr: 0.003, batchSize: 96, epochs: 1, bufferSize: 10000 },
+  strong: { lr: 0.0015, batchSize: 192, epochs: 3, bufferSize: 20000 },
 };
 const REPETITION_LIMIT = 3;
 const LONG_CHECK_LIMIT = 6;
@@ -69,11 +69,11 @@ const DEFAULT_SEARCH_THREADS = Math.max(2, Math.min(MAX_SEARCH_THREADS, navigato
 const MIN_MULTI_DEPTH = 3;
 
 const PYTHON_SIM_MAP = {
-  2: 140,
-  3: 220,
-  4: 340,
-  5: 520,
-  6: 740,
+  2: 300,
+  3: 600,
+  4: 900,
+  5: 1200,
+  6: 1500,
 };
 
 const boardEl = document.getElementById('board');
@@ -122,6 +122,7 @@ const state = {
   checkStreak: { side: null, count: 0 },
   backendOnline: false,
   backendDevice: '',
+  backendModelLabel: '',
   lastBookMove: false,
   useOpeningBook: true,
   useMultiThread: true,
@@ -142,6 +143,9 @@ let pythonTrainProgress = { current: 0, total: 0 };
 let pythonTrainRunning = false;
 
 function loadPythonTrainConfig() {
+  localStorage.removeItem('xiangqi_python_train_cfg_v1');
+  localStorage.removeItem('xiangqi_python_train_cfg_v2');
+  localStorage.removeItem('xiangqi_python_train_cfg_v3');
   const raw = localStorage.getItem(PYTHON_TRAIN_KEY);
   if (!raw) return { ...DEFAULT_PYTHON_TRAIN };
   try {
@@ -665,9 +669,9 @@ async function requestPythonMove(board, side, depth, timeLimitMs) {
       return { ok: false };
     }
     if (!data.move) {
-      return { ok: true, move: null };
-    }
-    return { ok: true, move: { from: data.move.from, to: data.move.to } };
+    return { ok: true, move: null };
+  }
+  return { ok: true, move: { from: data.move.from, to: data.move.to } };
   } catch (err) {
     return { ok: false };
   } finally {
@@ -675,13 +679,30 @@ async function requestPythonMove(board, side, depth, timeLimitMs) {
   }
 }
 
-function setBackendStatus(stateLabel, detail) {
+function setBackendStatus(stateLabel, detail, modelDetail = null) {
   if (!backendStatusEl) return;
   const bookTag = state.lastBookMove ? ' · 开局库' : '';
-  backendStatusEl.textContent = `后端状态：${stateLabel}${detail ? ' · ' + detail : ''}${bookTag}`;
+  const parts = [];
+  if (detail) parts.push(detail);
+  const effectiveModel = modelDetail === null ? state.backendModelLabel : modelDetail;
+  if (effectiveModel) parts.push(effectiveModel);
+  const detailText = parts.length ? ` · ${parts.join(' · ')}` : '';
+  backendStatusEl.textContent = `后端状态：${stateLabel}${detailText}${bookTag}`;
   backendStatusEl.classList.remove('good', 'bad');
   if (stateLabel === '在线') backendStatusEl.classList.add('good');
   if (stateLabel === '离线') backendStatusEl.classList.add('bad');
+}
+
+function formatModelLabel(modelInfo) {
+  if (!modelInfo) return '';
+  if (!modelInfo.loaded) return '模型 未加载';
+  const step = Number.isFinite(modelInfo.step) ? `#${modelInfo.step}` : '#?';
+  const fileName = modelInfo.path ? String(modelInfo.path).split('/').pop() : 'latest.pt';
+  const mtimeMs = Number.isFinite(modelInfo.mtime) ? modelInfo.mtime * 1000 : null;
+  if (mtimeMs) {
+    return `模型 ${fileName} @ ${formatClockTime(mtimeMs)}`;
+  }
+  return `模型 ${fileName} ${step}`;
 }
 
 async function refreshBackendStatus() {
@@ -692,9 +713,11 @@ async function refreshBackendStatus() {
     if (!res.ok) throw new Error('bad');
     const data = await res.json();
     const device = data && data.device ? `device ${data.device}` : '';
+    const modelLabel = formatModelLabel(data && data.model ? data.model : null);
     state.backendOnline = true;
     state.backendDevice = device;
-    setBackendStatus('在线', device);
+    state.backendModelLabel = modelLabel;
+    setBackendStatus('在线', device, modelLabel);
     if (statusEl && statusEl.textContent.includes('后端')) {
       const isFreshStart = !state.gameOver && state.history.length === 0 && !state.lastMove;
       if (isFreshStart) {
@@ -966,6 +989,13 @@ function requestAIMove() {
       } else {
         setStatus('后端未返回着法');
       }
+      return;
+    }
+    const legalMoves = generateLegalMoves(state.board, state.sideToMove);
+    const isLegal = legalMoves.some((m) => m.from === pythonResult.move.from && m.to === pythonResult.move.to);
+    if (!isLegal) {
+      state.aiThinking = false;
+      setStatus('警告：后端返回非法走法，已丢弃');
       return;
     }
     state.aiThinking = false;

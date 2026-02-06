@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
@@ -59,13 +60,29 @@ def load_checkpoint(path: Path, model: XiangqiNet, optimizer: torch.optim.Optimi
     return int(data.get("step", 0))
 
 
+def prune_checkpoints(checkpoint_dir: Path, keep: int = 3) -> None:
+    if keep < 1:
+        return
+    model_paths = []
+    for path in checkpoint_dir.glob("model_*.pt"):
+        match = re.match(r"model_(\d+)\.pt$", path.name)
+        if not match:
+            continue
+        model_paths.append((int(match.group(1)), path))
+
+    model_paths.sort(key=lambda item: item[0], reverse=True)
+    for _step, path in model_paths[max(0, keep - 1) :]:
+        if path.exists():
+            path.unlink()
+
+
 def train_step(model: XiangqiNet, optimizer: torch.optim.Optimizer, batch: List[TrainingExample], device: torch.device) -> float:
     if not batch:
         return 0.0
     model.train()
     boards, sides, policies, values = zip(*batch)
     inputs = torch.stack([encode_board(b, s) for b, s in zip(boards, sides)]).to(device)
-    target_policy = torch.from_numpy(np.stack(policies)).to(device)
+    target_policy = torch.from_numpy(np.stack(policies)).to(device=device, dtype=torch.float32)
     target_value = torch.tensor(values, dtype=torch.float32, device=device).unsqueeze(1)
 
     optimizer.zero_grad(set_to_none=True)
@@ -92,8 +109,10 @@ def main() -> None:
     parser.add_argument("--temperature-moves", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=2)
-    parser.add_argument("--buffer-size", type=int, default=12000)
+    parser.add_argument("--buffer-size", type=int, default=15000)
     parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--mcts-batch-size", type=int, default=128)
+    parser.add_argument("--batches-per-epoch", type=int, default=2)
     parser.add_argument("--checkpoint-dir", type=str, default=default_checkpoint)
     args = parser.parse_args()
 
@@ -111,6 +130,7 @@ def main() -> None:
             simulations=args.simulations,
             max_moves=args.max_moves,
             temperature_moves=args.temperature_moves,
+            mcts_batch_size=args.mcts_batch_size,
         )
         total_moves = 0
         workers = max(1, min(args.selfplay_workers, args.games_per_iter))
@@ -131,13 +151,15 @@ def main() -> None:
             continue
 
         for _ in range(args.epochs):
-            batch = buffer.sample(args.batch_size)
-            train_step(model, optimizer, batch, device)
+            for _ in range(args.batches_per_epoch):
+                batch = buffer.sample(args.batch_size)
+                train_step(model, optimizer, batch, device)
 
         step += 1
         save_checkpoint(checkpoint_dir / "latest.pt", model, optimizer, step)
         if step % 5 == 0:
             save_checkpoint(checkpoint_dir / f"model_{step}.pt", model, optimizer, step)
+        prune_checkpoints(checkpoint_dir, keep=3)
         print(f"iter {iteration + 1}/{args.iterations}: buffer={len(buffer)} moves={total_moves}", flush=True)
 
 

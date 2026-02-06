@@ -410,9 +410,17 @@ function isSquareAttacked(board, x, y, attackerSide) {
   for (const dir of HORSE_DIRS) {
     const hx = x + dir.dx;
     const hy = y + dir.dy;
-    const lx = x + dir.lx;
-    const ly = y + dir.ly;
-    if (!inBounds(hx, hy) || !inBounds(lx, ly)) continue;
+    if (!inBounds(hx, hy)) continue;
+    let lx;
+    let ly;
+    if (Math.abs(hx - x) === 2) {
+      lx = hx - (hx > x ? 1 : -1);
+      ly = hy;
+    } else {
+      lx = hx;
+      ly = hy - (hy > y ? 1 : -1);
+    }
+    if (!inBounds(lx, ly)) continue;
     if (board[coordToIndex(lx, ly)]) continue;
     const piece = board[coordToIndex(hx, hy)];
     if (piece && pieceType(piece) === 'N' && sideOf(piece) === attackerSide) {
@@ -528,9 +536,17 @@ function findAttackers(board, x, y, attackerSide) {
   for (const dir of HORSE_DIRS) {
     const hx = x + dir.dx;
     const hy = y + dir.dy;
-    const lx = x + dir.lx;
-    const ly = y + dir.ly;
-    if (!inBounds(hx, hy) || !inBounds(lx, ly)) continue;
+    if (!inBounds(hx, hy)) continue;
+    let lx;
+    let ly;
+    if (Math.abs(hx - x) === 2) {
+      lx = hx - (hx > x ? 1 : -1);
+      ly = hy;
+    } else {
+      lx = hx;
+      ly = hy - (hy > y ? 1 : -1);
+    }
+    if (!inBounds(lx, ly)) continue;
     if (board[coordToIndex(lx, ly)]) continue;
     const idx = coordToIndex(hx, hy);
     const piece = board[idx];
