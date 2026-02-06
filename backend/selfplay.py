@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -22,7 +22,12 @@ class SelfPlayConfig:
 TrainingExample = Tuple[Board, str, np.ndarray, float]
 
 
-def self_play_game(model, config: SelfPlayConfig, device: torch.device) -> Tuple[List[TrainingExample], int, float]:
+def self_play_game(
+    model,
+    config: SelfPlayConfig,
+    device: torch.device,
+    progress_cb: Optional[Callable[[int], None]] = None,
+) -> Tuple[List[TrainingExample], int, float]:
     board = initial_board()
     side = "r"
     history: List[Tuple[Board, str, np.ndarray]] = []
@@ -52,6 +57,8 @@ def self_play_game(model, config: SelfPlayConfig, device: torch.device) -> Tuple
             next_root = root.children.get(action)
 
         history.append((board, side, policy))
+        if progress_cb:
+            progress_cb(1)
         move = action_to_move(action)
         board = make_move(board, move)
         side = opposite(side)

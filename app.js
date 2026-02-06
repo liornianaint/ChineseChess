@@ -105,6 +105,7 @@ const pyTrainStopEl = document.getElementById('pyTrainStop');
 const pyTrainLogEl = document.getElementById('pyTrainLog');
 const pyTrainLogToggleEl = document.getElementById('pyTrainLogToggle');
 const pyTrainLogMetaEl = document.getElementById('pyTrainLogMeta');
+const pyTrainIterProgressEl = document.getElementById('pyTrainIterProgress');
 
 const state = {
   board: initialBoard(),
@@ -141,6 +142,7 @@ let pythonTrainLogExpanded = false;
 let pythonTrainLogLines = [];
 let pythonTrainStartTime = null;
 let pythonTrainProgress = { current: 0, total: 0 };
+let pythonTrainIterProgress = { current: 0, total: 0, pct: 0 };
 let pythonTrainRunning = false;
 
 function loadPythonTrainConfig() {
@@ -789,11 +791,27 @@ function parsePythonTrainProgress(lines) {
   return null;
 }
 
+function parsePythonIterProgress(lines) {
+  if (!Array.isArray(lines)) return null;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const match = lines[i].match(/progress\s+iter\s+(\d+)\s*\/\s*(\d+)\s+pct\s+(\d+)/i);
+    if (match) {
+      return {
+        current: parseInt(match[1], 10),
+        total: parseInt(match[2], 10),
+        pct: parseInt(match[3], 10),
+      };
+    }
+  }
+  return null;
+}
+
 function updatePythonTrainProgress(lines, config, running, startTime) {
   if (!running) {
     pythonTrainRunning = false;
     pythonTrainStartTime = null;
     pythonTrainProgress = { current: 0, total: 0 };
+    pythonTrainIterProgress = { current: 0, total: 0, pct: 0 };
     return;
   }
 
@@ -803,6 +821,13 @@ function updatePythonTrainProgress(lines, config, running, startTime) {
     pythonTrainProgress = parsed;
   } else if (config && typeof config.iterations === 'number') {
     pythonTrainProgress = { ...pythonTrainProgress, total: config.iterations };
+  }
+
+  const iterParsed = parsePythonIterProgress(lines);
+  if (iterParsed) {
+    pythonTrainIterProgress = iterParsed;
+  } else if (config && typeof config.iterations === 'number' && pythonTrainIterProgress.total === 0) {
+    pythonTrainIterProgress = { current: 1, total: config.iterations, pct: 0 };
   }
 
   if (Number.isFinite(startTime) && startTime > 0) {
@@ -848,13 +873,29 @@ function renderPythonTrainLog() {
     const eta = getPythonTrainEtaText();
     pyTrainLogMetaEl.textContent = eta || '';
   }
+
+  if (pyTrainIterProgressEl) {
+    const fill = pyTrainIterProgressEl.querySelector('.progress-fill');
+    const iterEl = pyTrainIterProgressEl.querySelector('.progress-iter');
+    const pctEl = pyTrainIterProgressEl.querySelector('.progress-pct');
+    const pct = Math.max(0, Math.min(100, pythonTrainIterProgress.pct || 0));
+    if (fill) fill.style.width = `${pct}%`;
+    if (iterEl) {
+      const current = Math.max(0, pythonTrainIterProgress.current || 0);
+      const total = Math.max(0, pythonTrainIterProgress.total || 0);
+      iterEl.textContent = `迭代 ${current}/${total}`;
+    }
+    if (pctEl) pctEl.textContent = `${pct.toFixed(1)}%`;
+  }
 }
 
 function setPythonTrainLog(value) {
   if (Array.isArray(value)) {
-    pythonTrainLogLines = value.slice();
+    pythonTrainLogLines = value.filter((line) => !(line && /^progress\s+iter\s+/i.test(line)));
   } else if (value) {
-    pythonTrainLogLines = String(value).split('\n');
+    pythonTrainLogLines = String(value)
+      .split('\n')
+      .filter((line) => !(line && /^progress\s+iter\s+/i.test(line)));
   } else {
     pythonTrainLogLines = [];
   }
@@ -927,6 +968,7 @@ async function startPythonTraining() {
   const { iterations, gamesPerIter, simulations, lr, batchSize, epochs, bufferSize } = readPythonTrainInputs();
   pythonTrainStartTime = Date.now();
   pythonTrainProgress = { current: 0, total: iterations };
+  pythonTrainIterProgress = { current: 1, total: iterations, pct: 0 };
   pythonTrainRunning = true;
   setPythonTrainControls(true);
   setPythonTrainLog('正在启动 Python 训练…');

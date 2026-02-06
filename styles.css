@@ -424,6 +424,41 @@ label {
   color: rgba(60, 40, 20, 0.6);
 }
 
+.log-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+
+.progress-bar {
+  width: 140px;
+  height: 6px;
+  background: rgba(60, 40, 20, 0.18);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-bar--small {
+  width: 120px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.progress-pct {
+  font-size: 0.8rem;
+  color: rgba(60, 40, 20, 0.65);
+}
+
+.progress-iter {
+  font-size: 0.8rem;
+  color: rgba(60, 40, 20, 0.65);
+}
+
 
 .weights {
   display: grid;
@@ -486,4 +521,3 @@ label {
   overflow-y: auto;
   white-space: pre-line;
 }
-

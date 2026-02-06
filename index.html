@@ -114,6 +114,13 @@
             <div class="hint">训练会占用大量算力，建议训练时减少对弈或暂停自动走子。</div>
             <div class="log-header">
               <span>训练日志</span>
+              <div class="log-progress" id="pyTrainIterProgress">
+                <div class="progress-bar progress-bar--small">
+                  <div class="progress-fill" style="width: 0%"></div>
+                </div>
+                <span class="progress-iter">迭代 0/0</span>
+                <span class="progress-pct">0%</span>
+              </div>
             </div>
             <div class="log" id="pyTrainLog">Python 训练日志会出现在这里…</div>
             <div class="log-meta" id="pyTrainLogMeta"></div>

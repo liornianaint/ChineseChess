@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import random
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 from pathlib import Path
@@ -133,15 +134,44 @@ def main() -> None:
             mcts_batch_size=args.mcts_batch_size,
         )
         total_moves = 0
+        train_unit_weight = max(1, args.max_moves // 5)
+        total_units = (args.games_per_iter * args.max_moves) + (args.epochs * args.batches_per_epoch * train_unit_weight)
+        done_units = 0
+        last_pct = -1
+        iter_label = f"{iteration + 1}/{args.iterations}"
+        progress_lock = threading.Lock()
+
+        def emit_progress(units: int, phase: str) -> None:
+            nonlocal done_units, last_pct
+            if units <= 0:
+                return
+            with progress_lock:
+                done_units += units
+                pct = 0
+                if total_units > 0:
+                    pct = int((done_units / total_units) * 100)
+                if pct == last_pct:
+                    return
+                last_pct = pct
+                print(f"progress iter {iter_label} pct {pct} phase {phase}", flush=True)
         workers = max(1, min(args.selfplay_workers, args.games_per_iter))
         if workers <= 1:
             for _ in range(args.games_per_iter):
-                examples, moves, _result = self_play_game(model, selfplay, device)
+                examples, moves, _result = self_play_game(model, selfplay, device, progress_cb=lambda n: emit_progress(n, "selfplay"))
                 buffer.extend(examples)
                 total_moves += moves
         else:
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(self_play_game, model, selfplay, device) for _ in range(args.games_per_iter)]
+                futures = [
+                    executor.submit(
+                        self_play_game,
+                        model,
+                        selfplay,
+                        device,
+                        lambda n: emit_progress(n, "selfplay"),
+                    )
+                    for _ in range(args.games_per_iter)
+                ]
                 for future in as_completed(futures):
                     examples, moves, _result = future.result()
                     buffer.extend(examples)
@@ -154,6 +184,10 @@ def main() -> None:
             for _ in range(args.batches_per_epoch):
                 batch = buffer.sample(args.batch_size)
                 train_step(model, optimizer, batch, device)
+                emit_progress(train_unit_weight, "train")
+
+        if done_units < total_units:
+            emit_progress(total_units - done_units, "save")
 
         step += 1
         save_checkpoint(checkpoint_dir / "latest.pt", model, optimizer, step)
