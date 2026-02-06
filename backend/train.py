@@ -135,31 +135,64 @@ def main() -> None:
         )
         total_moves = 0
         train_unit_weight = max(1, args.max_moves // 5)
-        total_units = (args.games_per_iter * args.max_moves) + (args.epochs * args.batches_per_epoch * train_unit_weight)
-        done_units = 0
+        train_units_total = args.epochs * args.batches_per_epoch * train_unit_weight
+        selfplay_moves_done = 0
+        training_units_done = 0
+        games_done = 0
+        moves_done_finished = 0
         last_pct = -1
         iter_label = f"{iteration + 1}/{args.iterations}"
         progress_lock = threading.Lock()
 
-        def emit_progress(units: int, phase: str) -> None:
-            nonlocal done_units, last_pct
+        def estimate_total_units() -> float:
+            if games_done > 0:
+                avg_moves = moves_done_finished / games_done
+            else:
+                avg_moves = args.max_moves
+            expected_selfplay = max(selfplay_moves_done, avg_moves * args.games_per_iter)
+            return expected_selfplay + train_units_total
+
+        def emit_progress(phase: str) -> None:
+            nonlocal last_pct
+            total_units = estimate_total_units()
+            done_units = selfplay_moves_done + training_units_done
+            pct = 0
+            if total_units > 0:
+                pct = int((done_units / total_units) * 100)
+            if pct == last_pct:
+                return
+            last_pct = pct
+            print(f"progress iter {iter_label} pct {pct} phase {phase}", flush=True)
+
+        def advance_selfplay(units: int) -> None:
+            nonlocal selfplay_moves_done
             if units <= 0:
                 return
             with progress_lock:
-                done_units += units
-                pct = 0
-                if total_units > 0:
-                    pct = int((done_units / total_units) * 100)
-                if pct == last_pct:
-                    return
-                last_pct = pct
-                print(f"progress iter {iter_label} pct {pct} phase {phase}", flush=True)
+                selfplay_moves_done += units
+                emit_progress("selfplay")
+
+        def finish_game(moves: int) -> None:
+            nonlocal games_done, moves_done_finished
+            with progress_lock:
+                games_done += 1
+                moves_done_finished += moves
+                emit_progress("selfplay")
+
+        def advance_train(units: int) -> None:
+            nonlocal training_units_done
+            if units <= 0:
+                return
+            with progress_lock:
+                training_units_done += units
+                emit_progress("train")
         workers = max(1, min(args.selfplay_workers, args.games_per_iter))
         if workers <= 1:
             for _ in range(args.games_per_iter):
-                examples, moves, _result = self_play_game(model, selfplay, device, progress_cb=lambda n: emit_progress(n, "selfplay"))
+                examples, moves, _result = self_play_game(model, selfplay, device, progress_cb=advance_selfplay)
                 buffer.extend(examples)
                 total_moves += moves
+                finish_game(moves)
         else:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = [
@@ -168,7 +201,7 @@ def main() -> None:
                         model,
                         selfplay,
                         device,
-                        lambda n: emit_progress(n, "selfplay"),
+                        advance_selfplay,
                     )
                     for _ in range(args.games_per_iter)
                 ]
@@ -176,6 +209,7 @@ def main() -> None:
                     examples, moves, _result = future.result()
                     buffer.extend(examples)
                     total_moves += moves
+                    finish_game(moves)
 
         if len(buffer) == 0:
             continue
@@ -184,10 +218,7 @@ def main() -> None:
             for _ in range(args.batches_per_epoch):
                 batch = buffer.sample(args.batch_size)
                 train_step(model, optimizer, batch, device)
-                emit_progress(train_unit_weight, "train")
-
-        if done_units < total_units:
-            emit_progress(total_units - done_units, "save")
+                advance_train(train_unit_weight)
 
         step += 1
         save_checkpoint(checkpoint_dir / "latest.pt", model, optimizer, step)
