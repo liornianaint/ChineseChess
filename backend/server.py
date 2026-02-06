@@ -22,7 +22,7 @@ from .opening_book import opening_book_move
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 CHECKPOINT_PATH = BASE_DIR / "backend" / "checkpoints" / "latest.pt"
-TRAIN_LOG_LIMIT = 120
+TRAIN_LOG_LIMIT = 5000
 
 MODEL_LOCK = threading.Lock()
 MODEL_INFO: Dict[str, Optional[object]] = {
