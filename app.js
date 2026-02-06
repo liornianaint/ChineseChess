@@ -783,7 +783,9 @@ const PYTHON_LOG_MAX_LINES = 2;
 function parsePythonTrainProgress(lines) {
   if (!Array.isArray(lines)) return null;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const match = lines[i].match(/iter\s*(\d+)\s*\/\s*(\d+)/i);
+    const line = lines[i];
+    if (!line || /^progress\s+iter\s+/i.test(line)) continue;
+    const match = line.match(/^iter\s*(\d+)\s*\/\s*(\d+)/i);
     if (match) {
       return { current: parseInt(match[1], 10), total: parseInt(match[2], 10) };
     }
