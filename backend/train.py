@@ -40,25 +40,32 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def save_checkpoint(path: Path, model: XiangqiNet, optimizer: torch.optim.Optimizer, step: int) -> None:
+def save_checkpoint(
+    path: Path,
+    model: XiangqiNet,
+    optimizer: torch.optim.Optimizer,
+    step: int,
+    total_games: int,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "step": step,
+            "total_games": int(total_games),
         },
         path,
     )
 
 
-def load_checkpoint(path: Path, model: XiangqiNet, optimizer: torch.optim.Optimizer) -> int:
+def load_checkpoint(path: Path, model: XiangqiNet, optimizer: torch.optim.Optimizer) -> Tuple[int, int]:
     if not path.exists():
-        return 0
+        return 0, 0
     data = torch.load(path, map_location="cpu")
     model.load_state_dict(data.get("model", {}))
     optimizer.load_state_dict(data.get("optimizer", {}))
-    return int(data.get("step", 0))
+    return int(data.get("step", 0)), int(data.get("total_games", 0))
 
 
 def prune_checkpoints(checkpoint_dir: Path, keep: int = 3) -> None:
@@ -122,9 +129,10 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     checkpoint_dir = Path(args.checkpoint_dir)
-    step = load_checkpoint(checkpoint_dir / "latest.pt", model, optimizer)
+    step, total_games = load_checkpoint(checkpoint_dir / "latest.pt", model, optimizer)
 
     buffer = ReplayBuffer(args.buffer_size)
+    games_done_total = total_games
 
     for iteration in range(args.iterations):
         selfplay = SelfPlayConfig(
@@ -211,6 +219,8 @@ def main() -> None:
                     total_moves += moves
                     finish_game(moves)
 
+        games_done_total += games_done
+
         if len(buffer) == 0:
             continue
 
@@ -221,9 +231,9 @@ def main() -> None:
                 advance_train(train_unit_weight)
 
         step += 1
-        save_checkpoint(checkpoint_dir / "latest.pt", model, optimizer, step)
+        save_checkpoint(checkpoint_dir / "latest.pt", model, optimizer, step, games_done_total)
         if step % 5 == 0:
-            save_checkpoint(checkpoint_dir / f"model_{step}.pt", model, optimizer, step)
+            save_checkpoint(checkpoint_dir / f"model_{step}.pt", model, optimizer, step, games_done_total)
         prune_checkpoints(checkpoint_dir, keep=3)
         print(f"iter {iteration + 1}/{args.iterations}: buffer={len(buffer)} moves={total_moves}", flush=True)
 

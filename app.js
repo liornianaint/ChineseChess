@@ -18,6 +18,7 @@ import {
 
 const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8001';
 const PYTHON_TRAIN_KEY = 'xiangqi_python_train_cfg_v4';
+const TOTAL_GAMES_KEY = 'xiangqi_total_games_v1';
 
 const DEFAULT_PYTHON_TRAIN = {
   iterations: 600,
@@ -125,6 +126,9 @@ const state = {
   backendOnline: false,
   backendDevice: '',
   backendModelLabel: '',
+  backendModelReady: false,
+  backendTotalGames: null,
+  backendLastCheck: 0,
   lastBookMove: false,
   useOpeningBook: true,
   useMultiThread: true,
@@ -144,6 +148,29 @@ let pythonTrainStartTime = null;
 let pythonTrainProgress = { current: 0, total: 0 };
 let pythonTrainIterProgress = { current: 0, total: 0, pct: 0 };
 let pythonTrainRunning = false;
+let pythonTrainStartPending = false;
+let pythonTrainStartRequestedAt = 0;
+let pythonTrainGamesDone = 0;
+let pythonTrainBaseTotalGames = loadTotalGames();
+let pythonTrainPostStopChecks = 0;
+let pythonTrainSyncPending = false;
+let pythonTrainSyncAttempts = 0;
+
+function loadTotalGames() {
+  const raw = localStorage.getItem(TOTAL_GAMES_KEY);
+  if (!raw) return null;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : null;
+}
+
+function saveTotalGames(value) {
+  if (!Number.isFinite(value)) return;
+  localStorage.setItem(TOTAL_GAMES_KEY, String(value));
+}
+
+function clearTotalGames() {
+  localStorage.removeItem(TOTAL_GAMES_KEY);
+}
 
 function loadPythonTrainConfig() {
   localStorage.removeItem('xiangqi_python_train_cfg_v1');
@@ -204,6 +231,9 @@ function pythonSimsForDepth(depth) {
 
 function setStatus(text) {
   statusEl.textContent = text;
+  if (typeof scheduleTrainCardSync === 'function') {
+    scheduleTrainCardSync();
+  }
 }
 
 function findKingIndexForSide(board, side) {
@@ -506,7 +536,7 @@ function updateLegalMoves() {
   state.legalMoves = moves.filter((move) => move.from === state.selected);
 }
 
-function onBoardClick(event) {
+async function onBoardClick(event) {
   const target = event.target;
   const cell = target && target.closest ? target.closest('.cell') : target && target.parentElement ? target.parentElement.closest('.cell') : null;
   if (!cell) return;
@@ -518,6 +548,16 @@ function onBoardClick(event) {
       renderBoard();
     }
     setStatus('后端离线，无法走子');
+    return;
+  }
+  await refreshBackendStatus();
+  if (!state.backendModelReady) {
+    if (state.selected !== null) {
+      state.selected = null;
+      state.legalMoves = [];
+      renderBoard();
+    }
+    setStatus('模型未加载，无法走子');
     return;
   }
   if (!isHumanTurn()) return;
@@ -698,7 +738,8 @@ async function requestPythonMove(board, side, depth, timeLimitMs) {
     });
 
     if (!res.ok) {
-      return { ok: false };
+      const reason = res.status === 409 ? 'model' : 'http';
+      return { ok: false, reason };
     }
     const data = await res.json();
     if (!data || typeof data !== 'object' || !('move' in data)) {
@@ -745,37 +786,74 @@ async function refreshBackendStatus() {
   if (!backendStatusEl) return;
   const baseUrl = getBackendBaseUrl();
   try {
-    const res = await fetch(`${baseUrl}/health`);
+    const res = await fetch(`${baseUrl}/health?ts=${Date.now()}`, { cache: 'no-store' });
     if (!res.ok) throw new Error('bad');
     const data = await res.json();
+    state.backendLastCheck = Date.now();
     const device = data && data.device ? `device ${data.device}` : '';
-    const modelLabel = formatModelLabel(data && data.model ? data.model : null);
+    const modelInfo = data && data.model ? data.model : null;
+    const modelLabel = formatModelLabel(modelInfo);
+    if (modelInfo && modelInfo.loaded === false) {
+      pythonTrainBaseTotalGames = null;
+      state.backendTotalGames = null;
+      clearTotalGames();
+    }
+    const modelTotal = modelInfo && Number.isFinite(modelInfo.total_games) ? modelInfo.total_games : null;
+    if (Number.isFinite(modelTotal)) {
+      if (!Number.isFinite(pythonTrainBaseTotalGames) || modelTotal >= pythonTrainBaseTotalGames) {
+        pythonTrainBaseTotalGames = modelTotal;
+        saveTotalGames(modelTotal);
+      }
+      state.backendTotalGames = modelTotal;
+    } else if (Number.isFinite(pythonTrainBaseTotalGames)) {
+      state.backendTotalGames = pythonTrainBaseTotalGames;
+    }
     state.backendOnline = true;
     state.backendDevice = device;
     state.backendModelLabel = modelLabel;
+    state.backendModelReady = Boolean(modelInfo && modelInfo.loaded);
     setBackendStatus('在线', device, modelLabel);
     if (statusEl && statusEl.textContent.includes('后端')) {
       const isFreshStart = !state.gameOver && state.history.length === 0 && !state.lastMove;
       if (isFreshStart) {
-        setStatus('新对局开始：红方先走');
+        if (state.backendModelReady) {
+          setStatus('新对局开始：红方先走');
+        } else {
+          setStatus('模型未加载，无法走子');
+        }
       } else {
         setTurnStatus();
       }
     }
+    scheduleTrainCardSync();
+    return state.backendModelReady;
   } catch (err) {
     state.backendOnline = false;
     state.backendDevice = '';
+    state.backendModelReady = false;
     state.lastBookMove = false;
+    state.backendLastCheck = Date.now();
     setBackendStatus('离线', '未连接');
     if (!state.gameOver) {
       setStatus('后端离线，无法走子');
     }
+    scheduleTrainCardSync();
+    return false;
   }
 }
 
 function setPythonTrainControls(running) {
   if (pyTrainStartEl) pyTrainStartEl.disabled = running;
   if (pyTrainStopEl) pyTrainStopEl.disabled = !running;
+  if (pyTrainStartEl) {
+    if (!pyTrainStartEl.dataset.label) pyTrainStartEl.dataset.label = pyTrainStartEl.textContent || '开始训练';
+    if (running) {
+      pyTrainStartEl.textContent = pythonTrainStartPending ? '启动中…' : '训练中…';
+    } else {
+      const original = pyTrainStartEl.dataset.label || '开始训练';
+      pyTrainStartEl.textContent = original;
+    }
+  }
 }
 
 const PYTHON_LOG_MAX_LINES = 2;
@@ -814,6 +892,7 @@ function updatePythonTrainProgress(lines, config, running, startTime) {
     pythonTrainStartTime = null;
     pythonTrainProgress = { current: 0, total: 0 };
     pythonTrainIterProgress = { current: 0, total: 0, pct: 0 };
+    pythonTrainGamesDone = 0;
     return;
   }
 
@@ -823,6 +902,10 @@ function updatePythonTrainProgress(lines, config, running, startTime) {
     pythonTrainProgress = parsed;
   } else if (config && typeof config.iterations === 'number') {
     pythonTrainProgress = { ...pythonTrainProgress, total: config.iterations };
+  }
+
+  if (config && typeof config.games_per_iter === 'number' && Number.isFinite(pythonTrainProgress.current)) {
+    pythonTrainGamesDone = Math.max(0, pythonTrainProgress.current) * config.games_per_iter;
   }
 
   const iterParsed = parsePythonIterProgress(lines);
@@ -873,7 +956,30 @@ function renderPythonTrainLog() {
 
   if (pyTrainLogMetaEl) {
     const eta = getPythonTrainEtaText();
-    pyTrainLogMetaEl.textContent = eta || '';
+    const lines = [];
+    if (eta) lines.push(eta);
+    const stats = [];
+    if (pythonTrainRunning) stats.push(`本次对局：${pythonTrainGamesDone}`);
+    const baseTotal = Number.isFinite(state.backendTotalGames) ? state.backendTotalGames : pythonTrainBaseTotalGames;
+    if (Number.isFinite(baseTotal)) {
+      const total = pythonTrainRunning ? baseTotal + pythonTrainGamesDone : baseTotal;
+      stats.push(`累计对局：${total}`);
+    }
+    if (stats.length) lines.push(stats.join(' · '));
+
+    pyTrainLogMetaEl.innerHTML = '';
+    pyTrainLogMetaEl.classList.toggle('is-two-lines', lines.length >= 2);
+    if (lines.length === 1) {
+      const div = document.createElement('div');
+      div.textContent = lines[0];
+      pyTrainLogMetaEl.appendChild(div);
+    } else if (lines.length >= 2) {
+      for (const line of lines) {
+        const div = document.createElement('div');
+        div.textContent = line;
+        pyTrainLogMetaEl.appendChild(div);
+      }
+    }
   }
 
   if (pyTrainIterProgressEl) {
@@ -888,6 +994,47 @@ function renderPythonTrainLog() {
       iterEl.textContent = `迭代 ${current}/${total}`;
     }
     if (pctEl) pctEl.textContent = `${pct.toFixed(1)}%`;
+  }
+
+  scheduleTrainCardSync();
+}
+
+function scheduleTrainCardSync() {
+  if (pythonTrainSyncPending) return;
+  pythonTrainSyncPending = true;
+  const runner = () => {
+    pythonTrainSyncPending = false;
+    syncTrainCardBottom();
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(runner);
+  } else {
+    setTimeout(runner, 0);
+  }
+}
+
+function syncTrainCardBottom() {
+  if (!statusEl || !pyTrainLogEl) return;
+  const trainCard = document.getElementById('trainCard');
+  if (!trainCard) return;
+  if (trainCard.style.transform) {
+    trainCard.style.transform = '';
+  }
+  const leftBottom = statusEl.getBoundingClientRect().bottom;
+  const rightBottom = trainCard.getBoundingClientRect().bottom;
+  const delta = leftBottom - rightBottom;
+  if (Math.abs(delta) < 0.25) {
+    pythonTrainSyncAttempts = 0;
+    return;
+  }
+  const current = pyTrainLogEl.getBoundingClientRect().height || 0;
+  const target = Math.max(80, current + delta);
+  pyTrainLogEl.style.height = `${target.toFixed(2)}px`;
+  if (pythonTrainSyncAttempts < 8) {
+    pythonTrainSyncAttempts += 1;
+    scheduleTrainCardSync();
+  } else {
+    pythonTrainSyncAttempts = 0;
   }
 }
 
@@ -908,13 +1055,29 @@ async function fetchPythonTrainStatus() {
   if (!pyTrainLogEl) return null;
   const baseUrl = getBackendBaseUrl();
   try {
-    const res = await fetch(`${baseUrl}/train/status`);
+    const timeoutMs = 4000;
+    const hasAbort = typeof AbortController !== 'undefined';
+    const controller = hasAbort ? new AbortController() : null;
+    const fetchPromise = fetch(`${baseUrl}/train/status`, {
+      signal: controller ? controller.signal : undefined,
+    });
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        if (controller) controller.abort();
+        reject(new Error('timeout'));
+      }, timeoutMs);
+    });
+    const res = await Promise.race([fetchPromise, timeoutPromise]);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
     return await res.json();
   } catch (err) {
-    setPythonTrainLog('无法连接训练后端。');
+    const msg =
+      err && (err.name === 'AbortError' || err.message === 'timeout')
+        ? '训练状态请求超时，请检查后端连接。'
+        : '无法连接训练后端。';
+    setPythonTrainLog(msg);
     return null;
   }
 }
@@ -923,7 +1086,31 @@ function startPythonTrainPolling() {
   if (pythonTrainTimer) return;
   pythonTrainTimer = setInterval(async () => {
     const status = await fetchPythonTrainStatus();
-    if (!status) return;
+    if (!status) {
+      if (pythonTrainStartPending && pythonTrainStartRequestedAt && Date.now() - pythonTrainStartRequestedAt > 10000) {
+        pythonTrainStartPending = false;
+        pythonTrainRunning = false;
+        setPythonTrainControls(false);
+        setPythonTrainLog('启动训练失败：后端未收到启动请求。');
+        stopPythonTrainPolling();
+      }
+      return;
+    }
+    if (status.running) {
+      pythonTrainPostStopChecks = 0;
+    }
+    if (pythonTrainStartPending) {
+      if (status.running) {
+        pythonTrainStartPending = false;
+      } else if (pythonTrainStartRequestedAt && Date.now() - pythonTrainStartRequestedAt > 10000) {
+        pythonTrainStartPending = false;
+        pythonTrainRunning = false;
+        setPythonTrainControls(false);
+        setPythonTrainLog('启动训练失败：后端未收到启动请求。');
+        stopPythonTrainPolling();
+        return;
+      }
+    }
     updatePythonTrainProgress(status.lines, status.config, Boolean(status.running), status.startTime);
     if (Array.isArray(status.lines) && status.lines.length) {
       setPythonTrainLog(status.lines);
@@ -931,8 +1118,13 @@ function startPythonTrainPolling() {
       setPythonTrainLog('训练中（首轮耗时较长，请耐心等待…）');
     }
     setPythonTrainControls(Boolean(status.running));
-    if (!status.running) {
-      stopPythonTrainPolling();
+    if (!status.running && !pythonTrainStartPending) {
+      if (pythonTrainPostStopChecks === 0) pythonTrainPostStopChecks = 3;
+      pythonTrainPostStopChecks -= 1;
+      refreshBackendStatus();
+      if (pythonTrainPostStopChecks <= 0) {
+        stopPythonTrainPolling();
+      }
     }
   }, 2000);
 }
@@ -947,7 +1139,7 @@ function stopPythonTrainPolling() {
 function readPythonTrainInputs() {
   const iterations = clampInt(pyTrainItersEl?.value, 1, 5000, pythonTrainConfig.iterations);
   const gamesPerIter = clampInt(pyTrainGamesEl?.value, 1, 200, pythonTrainConfig.gamesPerIter);
-  const simulations = clampInt(pyTrainSimsEl?.value, 32, 4000, pythonTrainConfig.simulations);
+  const simulations = clampInt(pyTrainSimsEl?.value, 20, 4000, pythonTrainConfig.simulations);
   const lr = clampFloat(pyTrainLrEl?.value, 0.0005, 0.01, pythonTrainConfig.lr);
   const batchSize = clampInt(pyTrainBatchEl?.value, 16, 512, pythonTrainConfig.batchSize);
   const epochs = clampInt(pyTrainEpochsEl?.value, 1, 6, pythonTrainConfig.epochs);
@@ -972,9 +1164,26 @@ async function startPythonTraining() {
   pythonTrainProgress = { current: 0, total: iterations };
   pythonTrainIterProgress = { current: 1, total: iterations, pct: 0 };
   pythonTrainRunning = true;
+  pythonTrainStartPending = true;
+  pythonTrainStartRequestedAt = Date.now();
+  if (Number.isFinite(state.backendTotalGames)) {
+    pythonTrainBaseTotalGames = state.backendTotalGames;
+  }
+  pythonTrainGamesDone = 0;
   setPythonTrainControls(true);
-  setPythonTrainLog('正在启动 Python 训练…');
+  if (pyTrainStartEl) {
+    if (!pyTrainStartEl.dataset.label) pyTrainStartEl.dataset.label = pyTrainStartEl.textContent || '开始训练';
+    pyTrainStartEl.textContent = '启动中…';
+  }
+  setPythonTrainLog('已发送启动请求，等待后端响应…');
+  startPythonTrainPolling();
   const baseUrl = getBackendBaseUrl();
+  const hasAbort = typeof AbortController !== 'undefined';
+  const controller = hasAbort ? new AbortController() : null;
+  const timeoutMs = 10000;
+  const timeout = setTimeout(() => {
+    if (controller) controller.abort();
+  }, timeoutMs);
   try {
     const res = await fetch(`${baseUrl}/train/start`, {
       method: 'POST',
@@ -988,14 +1197,44 @@ async function startPythonTraining() {
         epochs,
         buffer_size: bufferSize,
       }),
+      signal: controller ? controller.signal : undefined,
     });
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+      let detail = '';
+      try {
+        const data = await res.json();
+        if (data && typeof data.detail === 'string') detail = data.detail;
+      } catch (_err) {
+        // ignore parse errors
+      }
+      const msg = detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status}`;
+      throw new Error(msg);
     }
-    startPythonTrainPolling();
   } catch (err) {
+    if (err && err.name === 'AbortError') {
+      setPythonTrainLog('启动训练超时，请确认后端可访问。');
+    } else {
+      const msg = err && err.message ? `启动训练失败：${err.message}` : '启动训练失败，请确认后端已启动。';
+      setPythonTrainLog(msg);
+    }
+    pythonTrainRunning = false;
+    pythonTrainStartPending = false;
     setPythonTrainControls(false);
-    setPythonTrainLog('启动训练失败，请确认后端已启动。');
+  } finally {
+    clearTimeout(timeout);
+    setTimeout(async () => {
+      const status = await fetchPythonTrainStatus();
+      if (!status) return;
+      const running = Boolean(status.running);
+      if (!running) {
+        pythonTrainRunning = false;
+        pythonTrainStartPending = false;
+        setPythonTrainControls(false);
+        if (pythonTrainLogLines.length === 0) {
+          setPythonTrainLog('启动训练失败：后端未收到启动请求。');
+        }
+      }
+    }, 12000);
   }
 }
 
@@ -1005,8 +1244,11 @@ async function stopPythonTraining() {
   try {
     await fetch(`${baseUrl}/train/stop`, { method: 'POST' });
     setPythonTrainLog('已请求停止训练，等待进程退出…');
+    setTimeout(refreshBackendStatus, 1200);
+    setTimeout(refreshBackendStatus, 3200);
   } catch (err) {
-    setPythonTrainLog('停止训练失败，请确认后端可访问。');
+    const msg = err && err.message ? `停止训练失败：${err.message}` : '停止训练失败，请确认后端可访问。';
+    setPythonTrainLog(msg);
   }
 }
 
@@ -1024,10 +1266,16 @@ async function initPythonTrainingUI() {
   if (status.running) {
     startPythonTrainPolling();
   }
+  scheduleTrainCardSync();
 }
 
-function requestAIMove() {
+async function requestAIMove() {
   if (state.aiThinking || state.gameOver) return;
+  await refreshBackendStatus();
+  if (!state.backendModelReady) {
+    setStatus('模型未加载，无法走子');
+    return;
+  }
   state.aiThinking = true;
 
   const depth = parseInt(depthEl.value, 10);
@@ -1046,6 +1294,13 @@ function requestAIMove() {
     const pythonResult = await requestPythonMove(state.board, state.sideToMove, depth, timeLimitMs);
     if (!pythonResult || !pythonResult.ok) {
       state.aiThinking = false;
+      if (pythonResult && pythonResult.reason === 'model') {
+        state.backendModelReady = false;
+        state.lastBookMove = false;
+        setBackendStatus('在线', state.backendDevice || '', state.backendModelLabel);
+        setStatus('模型未加载，无法走子');
+        return;
+      }
       state.backendOnline = false;
       state.backendDevice = '';
       state.lastBookMove = false;
@@ -1086,7 +1341,11 @@ function resetGame() {
   state.useOpeningBook = openingBookEl ? openingBookEl.checked : true;
   initDrawState();
   if (state.backendOnline) {
-    setStatus('新对局开始：红方先走');
+    if (state.backendModelReady) {
+      setStatus('新对局开始：红方先走');
+    } else {
+      setStatus('模型未加载，无法走子');
+    }
   } else {
     setStatus('后端检测中…');
   }
@@ -1155,7 +1414,7 @@ function bindControls() {
   if (pyTrainSimsEl) {
     pyTrainSimsEl.value = pythonTrainConfig.simulations;
     pyTrainSimsEl.addEventListener('change', () => {
-      const simulations = clampInt(pyTrainSimsEl.value, 32, 4000, pythonTrainConfig.simulations);
+      const simulations = clampInt(pyTrainSimsEl.value, 20, 4000, pythonTrainConfig.simulations);
       pyTrainSimsEl.value = simulations;
       savePythonTrainConfig({ simulations });
     });
@@ -1251,6 +1510,8 @@ function bindControls() {
   });
 
   window.addEventListener('resize', renderTrace);
+  window.addEventListener('resize', scheduleTrainCardSync);
+  window.addEventListener('load', scheduleTrainCardSync);
 }
 
 createBoard();

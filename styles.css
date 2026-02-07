@@ -65,7 +65,7 @@ body {
   display: grid;
   grid-template-columns: minmax(320px, 1.2fr) minmax(280px, 0.8fr);
   gap: 28px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .board-panel {
@@ -272,14 +272,18 @@ body {
   font-weight: 600;
   width: calc(var(--cell-size) * 9 + 8px);
   align-self: flex-start;
+  margin-top: 0;
 }
 
 .control-panel {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  height: 100%;
-  justify-content: space-between;
+  justify-content: flex-start;
+}
+
+#trainCard {
+  margin-top: 0;
 }
 
 .backend-status {
@@ -424,6 +428,23 @@ label {
   margin-top: 6px;
   font-size: 0.82rem;
   color: rgba(60, 40, 20, 0.6);
+  line-height: 1.4;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.log-meta > div {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log-meta.is-two-lines {
+  height: 2.8em;
 }
 
 .log-progress {

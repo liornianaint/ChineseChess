@@ -30,6 +30,7 @@ MODEL_INFO: Dict[str, Optional[object]] = {
     "step": None,
     "mtime": None,
     "path": str(CHECKPOINT_PATH),
+    "total_games": None,
 }
 
 
@@ -76,11 +77,13 @@ def load_model(device: torch.device) -> XiangqiNet:
         model.load_state_dict(data.get("model", data))
         step = int(data.get("step", 0)) if isinstance(data, dict) else 0
         mtime = CHECKPOINT_PATH.stat().st_mtime
+        total_games = int(data.get("total_games", 0)) if isinstance(data, dict) else 0
         MODEL_INFO = {
             "loaded": True,
             "step": step,
             "mtime": mtime,
             "path": str(CHECKPOINT_PATH),
+            "total_games": total_games,
         }
     else:
         MODEL_INFO = {
@@ -88,6 +91,7 @@ def load_model(device: torch.device) -> XiangqiNet:
             "step": None,
             "mtime": None,
             "path": str(CHECKPOINT_PATH),
+            "total_games": None,
         }
     model.eval()
     return model
@@ -99,6 +103,7 @@ def reload_model() -> bool:
         MODEL_INFO["loaded"] = False
         MODEL_INFO["step"] = None
         MODEL_INFO["mtime"] = None
+        MODEL_INFO["total_games"] = None
         return False
     with MODEL_LOCK:
         MODEL = load_model(DEVICE)
@@ -249,6 +254,11 @@ def _startup_load_model() -> None:
 
 @app.get("/health")
 def health() -> dict:
+    if not CHECKPOINT_PATH.exists():
+        MODEL_INFO["loaded"] = False
+        MODEL_INFO["step"] = None
+        MODEL_INFO["mtime"] = None
+        MODEL_INFO["total_games"] = None
     return {"status": "ok", "device": str(DEVICE), "model": MODEL_INFO}
 
 
@@ -259,6 +269,8 @@ def root() -> dict:
 
 @app.post("/ai/move", response_model=MoveResponse)
 def ai_move(req: MoveRequest):
+    if not CHECKPOINT_PATH.exists() or not MODEL_INFO.get("loaded"):
+        raise HTTPException(status_code=409, detail="model_not_loaded")
     try:
         board = validate_board(req.board)
     except ValueError as exc:

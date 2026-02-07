@@ -26,7 +26,7 @@
         </section>
 
         <aside class="control-panel">
-          <div class="card">
+          <div class="card" id="playCard">
             <h2>对弈设置</h2>
             <div class="row">
               <label>
@@ -62,7 +62,7 @@
             </div>
           </div>
 
-          <div class="card">
+          <div class="card" id="trainCard">
             <h2>Python 训练</h2>
             <div class="row">
               <label for="pyTrainIters" title="迭代次数：训练轮数。总对局数=迭代次数×每轮对局。建议 50-600。">迭代次数</label>
@@ -74,7 +74,7 @@
             </div>
             <div class="row">
               <label for="pyTrainSims" title="每步 MCTS 搜索的仿真次数。推荐 120-480，越高越强但越慢。">MCTS 仿真数</label>
-              <input id="pyTrainSims" type="number" min="32" max="4000" value="320" />
+              <input id="pyTrainSims" type="number" min="20" max="4000" value="320" />
             </div>
             <div class="row">
               <label for="pyTrainAdvanced" title="显示/隐藏学习率、batch size、epochs、buffer size 等高级参数。">高级参数</label>
@@ -129,6 +129,6 @@
       </main>
     </div>
 
-    <script type="module" src="app.js"></script>
+    <script type="module" src="app.js?v=20260207"></script>
   </body>
 </html>
