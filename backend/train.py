@@ -6,6 +6,7 @@ import random
 import threading
 import shutil
 import sys
+import importlib
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
@@ -198,8 +199,8 @@ def main() -> None:
                 model = torch.compile(model)
             except Exception:
                 try:
-                    import torch._dynamo
-                    torch._dynamo.config.suppress_errors = True
+                    torch_dynamo = importlib.import_module("torch._dynamo")
+                    torch_dynamo.config.suppress_errors = True
                 except Exception:
                     pass
 
