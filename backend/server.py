@@ -84,7 +84,13 @@ def maybe_warn_cuda_install(device: torch.device) -> None:
         )
 
 
+_TORCH_DIAG_PRINTED = False
+
+
 def print_torch_diag() -> None:
+    global _TORCH_DIAG_PRINTED
+    if _TORCH_DIAG_PRINTED:
+        return
     try:
         print(f"python: {sys.executable}", file=sys.stderr)
         print(f"torch: {torch.__version__}", file=sys.stderr)
@@ -94,6 +100,7 @@ def print_torch_diag() -> None:
         print(f"device count: {torch.cuda.device_count()}", file=sys.stderr)
         if torch.cuda.is_available():
             print(f"gpu: {torch.cuda.get_device_name(0)}", file=sys.stderr)
+        _TORCH_DIAG_PRINTED = True
     except Exception as exc:
         print(f"torch diag failed: {exc}", file=sys.stderr)
 
@@ -283,7 +290,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-print_torch_diag()
 DEVICE = get_device()
 maybe_warn_cuda_install(DEVICE)
 enable_cuda_performance(DEVICE)
@@ -293,6 +299,7 @@ TRAINER = TrainingManager()
 
 @app.on_event("startup")
 def _startup_load_model() -> None:
+    print_torch_diag()
     reload_model()
 
 
