@@ -84,6 +84,20 @@ def maybe_warn_cuda_install(device: torch.device) -> None:
         )
 
 
+def print_torch_diag() -> None:
+    try:
+        print(f"python: {sys.executable}", file=sys.stderr)
+        print(f"torch: {torch.__version__}", file=sys.stderr)
+        print(f"torch file: {torch.__file__}", file=sys.stderr)
+        print(f"cuda available: {torch.cuda.is_available()}", file=sys.stderr)
+        print(f"cuda version: {torch.version.cuda}", file=sys.stderr)
+        print(f"device count: {torch.cuda.device_count()}", file=sys.stderr)
+        if torch.cuda.is_available():
+            print(f"gpu: {torch.cuda.get_device_name(0)}", file=sys.stderr)
+    except Exception as exc:
+        print(f"torch diag failed: {exc}", file=sys.stderr)
+
+
 def enable_cuda_performance(device: torch.device) -> None:
     if device.type != "cuda":
         return
@@ -269,6 +283,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+print_torch_diag()
 DEVICE = get_device()
 maybe_warn_cuda_install(DEVICE)
 enable_cuda_performance(DEVICE)
