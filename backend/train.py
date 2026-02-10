@@ -84,7 +84,14 @@ def prune_checkpoints(checkpoint_dir: Path, keep: int = 3) -> None:
             path.unlink()
 
 
-def train_step(model: XiangqiNet, optimizer: torch.optim.Optimizer, batch: List[TrainingExample], device: torch.device) -> float:
+def train_step(
+    model: XiangqiNet,
+    optimizer: torch.optim.Optimizer,
+    batch: List[TrainingExample],
+    device: torch.device,
+    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    use_amp: bool = False,
+) -> float:
     if not batch:
         return 0.0
     model.train()
@@ -94,15 +101,20 @@ def train_step(model: XiangqiNet, optimizer: torch.optim.Optimizer, batch: List[
     target_value = torch.tensor(values, dtype=torch.float32, device=device).unsqueeze(1)
 
     optimizer.zero_grad(set_to_none=True)
-    pred_policy, pred_value = model(inputs)
+    with torch.cuda.amp.autocast(enabled=use_amp):
+        pred_policy, pred_value = model(inputs)
+        log_probs = F.log_softmax(pred_policy, dim=1)
+        policy_loss = -(target_policy * log_probs).sum(dim=1).mean()
+        value_loss = F.mse_loss(pred_value, target_value)
+        loss = policy_loss + value_loss
 
-    log_probs = F.log_softmax(pred_policy, dim=1)
-    policy_loss = -(target_policy * log_probs).sum(dim=1).mean()
-    value_loss = F.mse_loss(pred_value, target_value)
-    loss = policy_loss + value_loss
-
-    loss.backward()
-    optimizer.step()
+    if use_amp and scaler is not None:
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        loss.backward()
+        optimizer.step()
     return float(loss.item())
 
 
@@ -119,14 +131,35 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--buffer-size", type=int, default=15000)
     parser.add_argument("--lr", type=float, default=2e-3)
-    parser.add_argument("--mcts-batch-size", type=int, default=128)
+    parser.add_argument("--mcts-batch-size", type=int, default=256)
     parser.add_argument("--batches-per-epoch", type=int, default=2)
     parser.add_argument("--checkpoint-dir", type=str, default=default_checkpoint)
     args = parser.parse_args()
 
     device = get_device()
+    use_amp = device.type == "cuda"
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
     model = XiangqiNet().to(device)
+
+    if device.type == "cuda":
+        auto_workers = min(args.games_per_iter, max(4, args.mcts_batch_size // 32))
+        args.selfplay_workers = max(args.selfplay_workers, auto_workers)
+
+        if hasattr(torch, "compile"):
+            try:
+                model = torch.compile(model)
+            except Exception:
+                pass
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     checkpoint_dir = Path(args.checkpoint_dir)
     step, total_games = load_checkpoint(checkpoint_dir / "latest.pt", model, optimizer)
@@ -227,7 +260,7 @@ def main() -> None:
         for _ in range(args.epochs):
             for _ in range(args.batches_per_epoch):
                 batch = buffer.sample(args.batch_size)
-                train_step(model, optimizer, batch, device)
+                train_step(model, optimizer, batch, device, scaler=scaler, use_amp=use_amp)
                 advance_train(train_unit_weight)
 
         step += 1

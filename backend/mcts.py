@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -37,9 +38,11 @@ class Node:
 def evaluate(model, board: Board, side: str, device: torch.device) -> Tuple[np.ndarray, float]:
     model.eval()
     with torch.inference_mode():
-        x = encode_board(board, side).unsqueeze(0).to(device)
-        logits, value = model(x)
-        logits = logits[0].cpu().numpy()
+        amp_ctx = torch.cuda.amp.autocast(dtype=torch.float16) if device.type == "cuda" else nullcontext()
+        with amp_ctx:
+            x = encode_board(board, side).unsqueeze(0).to(device)
+            logits, value = model(x)
+        logits = logits[0].float().cpu().numpy()
         value = float(value[0].item())
     return logits, value
 
@@ -47,10 +50,12 @@ def evaluate(model, board: Board, side: str, device: torch.device) -> Tuple[np.n
 def evaluate_batch(model, boards, sides, device: torch.device):
     model.eval()
     with torch.inference_mode():
-        inputs = torch.stack([encode_board(b, s) for b, s in zip(boards, sides)]).to(device)
-        logits, values = model(inputs)
-        logits = logits.cpu().numpy()
-        values = values.squeeze(1).cpu().numpy()
+        amp_ctx = torch.cuda.amp.autocast(dtype=torch.float16) if device.type == "cuda" else nullcontext()
+        with amp_ctx:
+            inputs = torch.stack([encode_board(b, s) for b, s in zip(boards, sides)]).to(device)
+            logits, values = model(inputs)
+        logits = logits.float().cpu().numpy()
+        values = values.squeeze(1).float().cpu().numpy()
     return logits, values
 
 

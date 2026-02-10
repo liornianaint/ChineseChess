@@ -69,6 +69,18 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
+def enable_cuda_performance(device: torch.device) -> None:
+    if device.type != "cuda":
+        return
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
+
 def load_model(device: torch.device) -> XiangqiNet:
     global MODEL_INFO
     model = XiangqiNet().to(device)
@@ -243,6 +255,7 @@ app.add_middleware(
 )
 
 DEVICE = get_device()
+enable_cuda_performance(DEVICE)
 MODEL = load_model(DEVICE)
 TRAINER = TrainingManager()
 
@@ -288,7 +301,12 @@ def ai_move(req: MoveRequest):
                 "stats": {"sims": 0, "visits": 0, "book": True, "boardKey": position_key(board, side)},
             }
 
-    config = MCTSConfig(simulations=max(16, min(req.sims, 4000)))
+    sim_count = max(16, min(req.sims, 4000))
+    if DEVICE.type == "cuda":
+        mcts_batch = min(256, sim_count)
+    else:
+        mcts_batch = min(64, sim_count)
+    config = MCTSConfig(simulations=sim_count, batch_size=mcts_batch)
     with MODEL_LOCK:
         root = run_mcts(MODEL, board, side, config, DEVICE)
         action = select_action(root, req.temperature)
