@@ -21,6 +21,16 @@ class MCTSConfig:
     batch_size: int = 64
 
 
+def get_autocast(device: torch.device):
+    if device.type != "cuda":
+        return nullcontext()
+    if hasattr(torch, "autocast"):
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast("cuda", dtype=torch.float16)
+    return torch.cuda.amp.autocast(dtype=torch.float16)
+
+
 class Node:
     def __init__(self, prior: float):
         self.prior = float(prior)
@@ -38,8 +48,7 @@ class Node:
 def evaluate(model, board: Board, side: str, device: torch.device) -> Tuple[np.ndarray, float]:
     model.eval()
     with torch.inference_mode():
-        amp_ctx = torch.cuda.amp.autocast(dtype=torch.float16) if device.type == "cuda" else nullcontext()
-        with amp_ctx:
+        with get_autocast(device):
             x = encode_board(board, side).unsqueeze(0).to(device)
             logits, value = model(x)
         logits = logits[0].float().cpu().numpy()
@@ -50,8 +59,7 @@ def evaluate(model, board: Board, side: str, device: torch.device) -> Tuple[np.n
 def evaluate_batch(model, boards, sides, device: torch.device):
     model.eval()
     with torch.inference_mode():
-        amp_ctx = torch.cuda.amp.autocast(dtype=torch.float16) if device.type == "cuda" else nullcontext()
-        with amp_ctx:
+        with get_autocast(device):
             inputs = torch.stack([encode_board(b, s) for b, s in zip(boards, sides)]).to(device)
             logits, values = model(inputs)
         logits = logits.float().cpu().numpy()

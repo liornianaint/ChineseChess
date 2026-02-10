@@ -4,6 +4,8 @@ import argparse
 import re
 import random
 import threading
+import shutil
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 from pathlib import Path
@@ -38,6 +40,35 @@ def get_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def maybe_warn_cuda_install(device: torch.device) -> None:
+    if device.type != "cpu":
+        return
+    if torch.backends.mps.is_available():
+        return
+    if shutil.which("nvidia-smi") or Path("/proc/driver/nvidia/version").exists():
+        print(
+            "检测到 NVIDIA GPU，但当前 PyTorch 未启用 CUDA。"
+            "可执行：pip install --upgrade --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio",
+            flush=True,
+        )
+
+
+def get_autocast(device: torch.device, enabled: bool):
+    if not enabled or device.type != "cuda":
+        return nullcontext()
+    if hasattr(torch, "autocast"):
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast("cuda", dtype=torch.float16)
+    return torch.cuda.amp.autocast(dtype=torch.float16)
+
+
+def get_grad_scaler(enabled: bool):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler(enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
 def save_checkpoint(
@@ -101,7 +132,8 @@ def train_step(
     target_value = torch.tensor(values, dtype=torch.float32, device=device).unsqueeze(1)
 
     optimizer.zero_grad(set_to_none=True)
-    with torch.cuda.amp.autocast(enabled=use_amp):
+    autocast_ctx = get_autocast(device, use_amp)
+    with autocast_ctx:
         pred_policy, pred_value = model(inputs)
         log_probs = F.log_softmax(pred_policy, dim=1)
         policy_loss = -(target_policy * log_probs).sum(dim=1).mean()
@@ -137,6 +169,7 @@ def main() -> None:
     args = parser.parse_args()
 
     device = get_device()
+    maybe_warn_cuda_install(device)
     use_amp = device.type == "cuda"
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -159,7 +192,7 @@ def main() -> None:
                 pass
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = get_grad_scaler(use_amp)
 
     checkpoint_dir = Path(args.checkpoint_dir)
     step, total_games = load_checkpoint(checkpoint_dir / "latest.pt", model, optimizer)

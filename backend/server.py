@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from pathlib import Path
 import time
+import shutil
 import subprocess
 import sys
 import threading
@@ -67,6 +68,20 @@ def get_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def maybe_warn_cuda_install(device: torch.device) -> None:
+    if device.type != "cpu":
+        return
+    if torch.backends.mps.is_available():
+        return
+    if shutil.which("nvidia-smi") or Path("/proc/driver/nvidia/version").exists():
+        print(
+            "检测到 NVIDIA GPU，但当前 PyTorch 未启用 CUDA。"
+            "可执行：pip install --upgrade --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def enable_cuda_performance(device: torch.device) -> None:
@@ -255,6 +270,7 @@ app.add_middleware(
 )
 
 DEVICE = get_device()
+maybe_warn_cuda_install(DEVICE)
 enable_cuda_performance(DEVICE)
 MODEL = load_model(DEVICE)
 TRAINER = TrainingManager()
