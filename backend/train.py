@@ -5,6 +5,7 @@ import re
 import random
 import threading
 import shutil
+import sys
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
@@ -187,9 +188,20 @@ def main() -> None:
 
         if hasattr(torch, "compile"):
             try:
+                triton_ok = True
+                try:
+                    import triton  # noqa: F401
+                except Exception:
+                    triton_ok = False
+                if sys.platform.startswith("win") and not triton_ok:
+                    raise RuntimeError("triton not available on this setup")
                 model = torch.compile(model)
             except Exception:
-                pass
+                try:
+                    import torch._dynamo
+                    torch._dynamo.config.suppress_errors = True
+                except Exception:
+                    pass
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scaler = get_grad_scaler(use_amp)
